@@ -1,0 +1,186 @@
+fastapi
+uvicorn
+pandas
+numpy
+scikit-learn
+joblib
+yfinance
+jinja2
+
+“Resume PolicyMind AI Docker deployment”
+
+Generate Dockerfile + docker-compose.yml
+
+Add Kubernetes deployment manifests
+
+Create CI/CD pipeline (GitHub Actions)
+
+Create production-ready Swagger UI config
+
+Build system performance benchmark report
+
+Create whitepaper-style 10–15 page technical brief
+
+Turn this into a polished portfolio website
+
+kill process taskkill /PID 12345 /F
+
+@Service
+package com.policymind.document.service;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.policymind.document.entity.Document;
+import com.policymind.document.entity.DocumentChunk;
+import com.policymind.document.repository.DocumentChunkRepository;
+import com.policymind.document.repository.DocumentRepository;
+import lombok.RequiredArgsConstructor;
+import org.springframework.stereotype.Service;
+import org.springframework.web.multipart.MultipartFile;
+
+import java.time.LocalDateTime;
+import java.util.*;
+
+@Service
+@RequiredArgsConstructor
+public class DocumentService {
+
+    private final DocumentRepository repository;
+    private final ChunkService chunkService;
+    private final DocumentChunkRepository chunkRepository;
+    private final EmbeddingService embeddingService;
+    private final OpenAiService openAiService;
+
+    // ================================
+    // DOCUMENT PROCESSING
+    // ================================
+
+    public String processDocument(MultipartFile file) {
+
+        try {
+
+            Document doc = new Document();
+            doc.setFileName(file.getOriginalFilename());
+            doc.setStatus("PROCESSING");
+            doc.setCreatedAt(LocalDateTime.now());
+
+            Document savedDoc = repository.save(doc);
+
+            String text = chunkService.extractText(file);
+            List<String> chunks = chunkService.chunkText(text);
+
+            chunkService.saveChunks(savedDoc.getId(), chunks);
+
+            savedDoc.setStatus("COMPLETED");
+            repository.save(savedDoc);
+
+            return "Document uploaded and processed successfully.";
+
+        } catch (Exception e) {
+            return "Processing failed: " + e.getMessage();
+        }
+    }
+
+    // ================================
+    // RAG QUESTION ANSWERING
+    // ================================
+
+    public String askQuestion(Long documentId, String question) {
+
+        // 1️⃣ Retrieve chunks
+        List<DocumentChunk> chunks =
+                chunkRepository.findByDocumentId(documentId);
+
+        if (chunks.isEmpty()) {
+            return "No chunks found for this document.";
+        }
+
+        // 2️⃣ Embed question
+        String questionEmbeddingJson =
+                embeddingService.generateEmbedding(question);
+
+        List<Double> questionEmbedding =
+                parseEmbedding(questionEmbeddingJson);
+
+        // 3️⃣ Rank chunks by cosine similarity
+        Map<DocumentChunk, Double> similarityScores = new HashMap<>();
+
+        for (DocumentChunk chunk : chunks) {
+
+            if (chunk.getEmbedding() == null) continue;
+
+            List<Double> chunkEmbedding =
+                    parseEmbedding(chunk.getEmbedding());
+
+            double similarity =
+                    cosineSimilarity(questionEmbedding, chunkEmbedding);
+
+            similarityScores.put(chunk, similarity);
+        }
+
+        // 4️⃣ Select Top 3 most relevant chunks
+        List<DocumentChunk> topChunks =
+                similarityScores.entrySet()
+                        .stream()
+                        .sorted(Map.Entry.<DocumentChunk, Double>comparingByValue()
+                                .reversed())
+                        .limit(3)
+                        .map(Map.Entry::getKey)
+                        .toList();
+
+        // 5️⃣ Build context
+        StringBuilder context = new StringBuilder();
+
+        for (DocumentChunk chunk : topChunks) {
+            context.append(chunk.getContent()).append("\n\n");
+        }
+
+        // 6️⃣ Send to LLM
+        return openAiService.askLLM(context.toString(), question);
+    }
+
+    // ================================
+    // COSINE SIMILARITY
+    // ================================
+
+    private double cosineSimilarity(List<Double> v1, List<Double> v2) {
+
+        double dot = 0.0;
+        double normA = 0.0;
+        double normB = 0.0;
+
+        for (int i = 0; i < v1.size(); i++) {
+            dot += v1.get(i) * v2.get(i);
+            normA += Math.pow(v1.get(i), 2);
+            normB += Math.pow(v2.get(i), 2);
+        }
+
+        return dot / (Math.sqrt(normA) * Math.sqrt(normB));
+    }
+
+    // ================================
+    // EMBEDDING PARSER
+    // ================================
+
+    private List<Double> parseEmbedding(String json) {
+
+        try {
+            ObjectMapper mapper = new ObjectMapper();
+            JsonNode root = mapper.readTree(json);
+
+            JsonNode vector =
+                    root.get("data").get(0).get("embedding");
+
+            List<Double> result = new ArrayList<>();
+
+            for (JsonNode val : vector) {
+                result.add(val.asDouble());
+            }
+
+            return result;
+
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to parse embedding", e);
+        }
+    }
+}

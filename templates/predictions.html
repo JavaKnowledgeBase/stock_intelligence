@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>All Stock Predictions</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background: #0f172a;
+            color: white;
+            padding: 32px;
+        }
+        h1 {
+            margin-bottom: 8px;
+        }
+        .subtle {
+            color: #cbd5e1;
+            margin-bottom: 24px;
+        }
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+            gap: 16px;
+        }
+        .card {
+            background: #1e293b;
+            border-radius: 12px;
+            padding: 18px;
+            box-shadow: 0 10px 24px rgba(0, 0, 0, 0.2);
+        }
+        .row {
+            margin-bottom: 8px;
+        }
+        .bullish { color: #22c55e; }
+        .bearish { color: #ef4444; }
+        .tag {
+            display: inline-block;
+            padding: 4px 10px;
+            border-radius: 999px;
+            font-size: 12px;
+            background: #334155;
+            color: #e2e8f0;
+        }
+        .tag.baseline {
+            background: #7c2d12;
+        }
+        a {
+            color: #93c5fd;
+            text-decoration: none;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 28px;
+            background: #1e293b;
+            border-radius: 12px;
+            overflow: hidden;
+        }
+        th, td {
+            text-align: left;
+            padding: 12px 14px;
+            border-bottom: 1px solid #334155;
+        }
+        th {
+            background: #172554;
+        }
+        .errors {
+            margin-top: 24px;
+            padding: 16px;
+            border-radius: 12px;
+            background: #3f1d1d;
+        }
+    </style>
+</head>
+<body>
+    <h1>All Stock Predictions</h1>
+    <div class="subtle">
+        Showing {{ payload.count }} tickers from config. Trained-model results are listed before baseline fallbacks.
+    </div>
+
+    <div class="grid">
+        {% for item in payload.predictions %}
+        <div class="card">
+            <div class="row"><strong><a href="/dashboard/{{ item.ticker }}">{{ item.ticker }}</a></strong></div>
+            <div class="row">Close: ${{ item.previous_close }}</div>
+            <div class="row">Range: {{ item.predicted_range_percent }}%</div>
+            <div class="row">High / Low: ${{ item.predicted_high }} / ${{ item.predicted_low }}</div>
+            <div class="row">
+                Direction:
+                <span class="{{ 'bullish' if item.direction == 'Bullish' else 'bearish' }}">
+                    {{ item.direction }}
+                </span>
+            </div>
+            <div class="row">
+                <span class="tag {{ 'baseline' if item.prediction_source == 'baseline_fallback' else '' }}">
+                    {{ item.prediction_source }}
+                </span>
+            </div>
+            <div class="row">Model: {{ item.model_name }}</div>
+            <div class="row">Confidence: {{ item.confidence_score }}</div>
+        </div>
+        {% endfor %}
+    </div>
+
+    <table>
+        <thead>
+            <tr>
+                <th>Ticker</th>
+                <th>Range %</th>
+                <th>Direction</th>
+                <th>Source</th>
+                <th>Model MAE</th>
+                <th>Baseline MAE</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for item in payload.predictions %}
+            <tr>
+                <td><a href="/dashboard/{{ item.ticker }}">{{ item.ticker }}</a></td>
+                <td>{{ item.predicted_range_percent }}</td>
+                <td>{{ item.direction }}</td>
+                <td>{{ item.prediction_source }}</td>
+                <td>{{ item.model_mae }}</td>
+                <td>{{ item.baseline_mae }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+
+    {% if payload.errors %}
+    <div class="errors">
+        <strong>Skipped tickers:</strong>
+        {% for error in payload.errors %}
+        <div>{{ error.ticker }}: {{ error.detail }}</div>
+        {% endfor %}
+    </div>
+    {% endif %}
+</body>
+</html>
