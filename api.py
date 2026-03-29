@@ -1,42 +1,43 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse
+from fastapi.templating import Jinja2Templates
 import joblib
 import os
 import pandas as pd
 from config import TICKERS
-from fastapi.responses import HTMLResponse
-from fastapi.templating import Jinja2Templates
-from fastapi import Request
-from mega_double_random import generate_mega_numbers
-from mega_lstm_only import generate_mega_numbers_deep_ai
-
-
+from r2_storage import ensure_assets_available
 
 app = FastAPI(title="Stock Range Prediction API")
 
+MODEL_DIR = "models"
 templates = Jinja2Templates(directory="templates")
 
-MODEL_DIR = "models"
+
+def _should_use_baseline(model) -> bool:
+    explicit_flag = getattr(model, "use_baseline_", None)
+    if explicit_flag is not None:
+        return bool(explicit_flag)
+
+    training_mae = getattr(model, "training_mae_", None)
+    baseline_mae = getattr(model, "baseline_mae_", None)
+    if training_mae is None or baseline_mae is None:
+        return False
+
+    return float(baseline_mae) <= float(training_mae)
 
 
 @app.get("/")
 def home():
-    return {"message": "Stock Range Prediction API is running"}
+    return {"message": "Stock Range Prediction API is running", "dashboard": "/predictions"}
 
 
-@app.get("/dashboard/{ticker}", response_class=HTMLResponse)
-def dashboard(request: Request, ticker: str):
-
-    response = predict(ticker)
-
-    return templates.TemplateResponse(
-        "dashboard.html",
-        {"request": request, "data": response}
-    )
+@app.on_event("startup")
+def load_assets_on_startup():
+    ensure_assets_available()
 
 
-@app.get("/predict/{ticker}")
-def predict(ticker: str):
-
+def _get_prediction_payload(ticker: str) -> dict:
+    ensure_assets_available()
     ticker = ticker.upper()
 
     if ticker not in TICKERS:
@@ -50,66 +51,110 @@ def predict(ticker: str):
     model = joblib.load(model_path)
 
     df = pd.read_csv(f"data/features/{ticker}.csv")
+    df = df[pd.to_numeric(df["Close"], errors="coerce").notna()].copy()
+
+    for col in df.columns:
+        if col != "date":
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    df = df.dropna().reset_index(drop=True)
+
+    if df.empty:
+        raise HTTPException(status_code=500, detail="No valid feature rows available")
+
     latest = df.iloc[-1:]
 
-    # Align features exactly as training
-    X = latest.drop(columns=["high_t1", "low_t1"], errors="ignore")
+    X = latest.drop(columns=["date"], errors="ignore")
     X = X.reindex(columns=model.feature_columns_, fill_value=0)
 
-    prediction_pct = model.predict(X)[0]
+    if _should_use_baseline(model):
+        prediction_pct = float(latest["hl_pct"].values[0])
+        prediction_source = "baseline_fallback"
+    else:
+        prediction_pct = float(model.predict(X)[0])
+        prediction_source = "trained_model"
+
+    prediction_floor = getattr(model, "prediction_floor_", 0.5)
+    prediction_ceiling = getattr(model, "prediction_ceiling_", 5.0)
+    prediction_pct = max(min(prediction_pct, prediction_ceiling), prediction_floor)
 
     previous_close = float(latest["Close"].values[0])
-
-    # Predicted prices
     predicted_range_dollars = previous_close * (prediction_pct / 100)
     predicted_high = previous_close + predicted_range_dollars / 2
     predicted_low = previous_close - predicted_range_dollars / 2
 
-    # Predicted close (midpoint assumption)
-    predicted_close = (predicted_high + predicted_low) / 2
+    day_move = float(latest["oc_pct"].values[0])
+    direction = "Bullish" if day_move >= 0 else "Bearish"
 
-    # Expected volatility
-    expected_volatility = prediction_pct
-
-    # Direction
-    direction = "Bullish" if predicted_close > previous_close else "Bearish"
-
-    # Confidence score (simple MAE-based proxy)
-    confidence_score = max(0, 100 - model.training_mae_)
-
-    # Historical comparison
-    historical_avg_range = model.historical_avg_range_
-    atr_comparison = prediction_pct / model.atr_avg_
-    
-    mega_numbers = generate_mega_numbers()
-    
-    mega_numbers_deep = generate_mega_numbers_deep_ai()
-
-    
-
+    confidence_score = max(
+        0.0,
+        min(
+            100.0,
+            100 * (1 - (getattr(model, "training_mae_", prediction_pct) / max(prediction_pct, 0.01))),
+        ),
+    )
 
     return {
         "ticker": ticker,
         "previous_close": round(previous_close, 2),
-
         "predicted_high": round(predicted_high, 2),
         "predicted_low": round(predicted_low, 2),
-        "predicted_close": round(predicted_close, 2),
-
         "predicted_range_percent": round(prediction_pct, 2),
         "predicted_range_dollars": round(predicted_range_dollars, 2),
-
-        "expected_volatility_percent": round(expected_volatility, 2),
-
-        "model_mae": round(model.training_mae_, 4),
-        "confidence_score": round(confidence_score, 2),
-
-        "historical_average_range_percent": round(historical_avg_range, 2),
-        "atr_comparison_ratio": round(atr_comparison, 2),
-
         "direction": direction,
-        "mega_millions_double_random": mega_numbers,
-        "mega_millions_deep_ai": mega_numbers_deep,
-
-
+        "model_name": getattr(model, "model_name_", "unknown"),
+        "model_mae": round(float(getattr(model, "training_mae_", 0.0)), 4),
+        "baseline_mae": round(float(getattr(model, "baseline_mae_", 0.0)), 4),
+        "prediction_source": prediction_source,
+        "confidence_score": round(confidence_score, 2),
     }
+
+
+@app.get("/dashboard/{ticker}", response_class=HTMLResponse)
+def dashboard(request: Request, ticker: str):
+    data = _get_prediction_payload(ticker)
+    return templates.TemplateResponse(
+        "dashboard.html",
+        {"request": request, "data": data},
+    )
+
+
+@app.get("/predictions")
+def all_predictions():
+    results = []
+    errors = []
+
+    for ticker in TICKERS:
+        try:
+            results.append(_get_prediction_payload(ticker))
+        except HTTPException as exc:
+            errors.append({"ticker": ticker, "detail": exc.detail})
+        except Exception as exc:
+            errors.append({"ticker": ticker, "detail": str(exc)})
+
+    results.sort(
+        key=lambda item: (
+            0 if item["prediction_source"] == "trained_model" else 1,
+            -item["predicted_range_percent"],
+        )
+    )
+
+    return {
+        "count": len(results),
+        "errors": errors,
+        "predictions": results,
+    }
+
+
+@app.get("/predictions/ui", response_class=HTMLResponse)
+def all_predictions_ui(request: Request):
+    payload = all_predictions()
+    return templates.TemplateResponse(
+        "predictions.html",
+        {"request": request, "payload": payload},
+    )
+
+
+@app.get("/predict/{ticker}")
+def predict(ticker: str):
+    return _get_prediction_payload(ticker)

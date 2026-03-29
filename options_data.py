@@ -5,7 +5,10 @@ Created on Mon Mar  2 07:11:39 2026
 @author: rkafl
 """
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+import threading
+import time
 
 import pandas as pd
 import yfinance as yf
@@ -13,40 +16,106 @@ import yfinance as yf
 from config import DATA_DIR
 from build_features import build_features
 
+_CACHE_TTL_SECONDS = 900
+_CACHE_LOCK = threading.Lock()
+_CACHE = {}
+_MAX_WORKERS = 8
+
+
+def _cache_key(prefix, *parts):
+    return (prefix, *parts)
+
+
+def _get_cached(key):
+    now = time.time()
+    with _CACHE_LOCK:
+        entry = _CACHE.get(key)
+        if not entry:
+            return None
+        created_at, value = entry
+        if now - created_at > _CACHE_TTL_SECONDS:
+            _CACHE.pop(key, None)
+            return None
+        return value
+
+
+def _set_cached(key, value):
+    with _CACHE_LOCK:
+        _CACHE[key] = (time.time(), value)
+    return value
+
+
+def _clone_frame(df):
+    return df.copy() if isinstance(df, pd.DataFrame) else df
+
+
+def _get_ticker(ticker):
+    key = _cache_key("ticker", ticker)
+    cached = _get_cached(key)
+    if cached is not None:
+        return cached
+    return _set_cached(key, yf.Ticker(ticker))
+
+
+def get_price_history(ticker, period="6mo", interval="1d"):
+    key = _cache_key("history", ticker, period, interval)
+    cached = _get_cached(key)
+    if cached is not None:
+        return _clone_frame(cached)
+
+    history = yf.download(
+        ticker,
+        period=period,
+        interval=interval,
+        progress=False,
+        auto_adjust=False,
+        threads=False,
+    )
+    if history is None:
+        history = pd.DataFrame()
+
+    _set_cached(key, history.copy())
+    return history
+
 
 def get_stock_price(ticker):
-
-    data = yf.download(ticker, period="5d")
-
+    data = get_price_history(ticker, period="5d")
     return float(data["Close"].iloc[-1])
 
 
 def get_expirations(ticker):
+    key = _cache_key("expirations", ticker)
+    cached = _get_cached(key)
+    if cached is not None:
+        return list(cached)
 
-    tk = yf.Ticker(ticker)
-
-    return tk.options
+    tk = _get_ticker(ticker)
+    expirations = list(tk.options)
+    _set_cached(key, expirations)
+    return expirations
 
 
 def get_options_chain(ticker, expiry):
+    key = _cache_key("chain", ticker, expiry)
+    cached = _get_cached(key)
+    if cached is not None:
+        return _clone_frame(cached)
 
-    tk = yf.Ticker(ticker)
-
+    tk = _get_ticker(ticker)
     chain = tk.option_chain(expiry)
 
-    calls = chain.calls
-    puts = chain.puts
+    calls = chain.calls.copy()
+    puts = chain.puts.copy()
 
     calls["type"] = "call"
     puts["type"] = "put"
 
-    df = pd.concat([calls, puts])
-
+    df = pd.concat([calls, puts], ignore_index=True)
+    _set_cached(key, df.copy())
     return df
 
 
 def get_market_options_snapshot(ticker, max_contracts=10):
-
     expirations = get_expirations(ticker)
 
     if not expirations:
@@ -115,7 +184,6 @@ def get_market_options_snapshot(ticker, max_contracts=10):
 
 
 def get_full_market_options_snapshot(ticker):
-
     expirations = get_expirations(ticker)
 
     if not expirations:
@@ -150,53 +218,55 @@ def get_full_market_options_snapshot(ticker):
 
 
 def get_market_activity_snapshot_dir():
-
     snapshot_dir = Path(DATA_DIR) / "options_market_snapshots"
     snapshot_dir.mkdir(parents=True, exist_ok=True)
-
     return snapshot_dir
 
 
-def build_market_volume_table(tickers, lookback_days=7):
+def _fetch_volume_row(ticker, today):
+    try:
+        snapshot = get_full_market_options_snapshot(ticker)
+    except Exception:
+        snapshot = pd.DataFrame()
 
+    if snapshot.empty:
+        return None
+
+    call_volume = int(
+        snapshot.loc[
+            snapshot["option_type"] == "call",
+            "volume",
+        ].sum()
+    )
+    put_volume = int(
+        snapshot.loc[
+            snapshot["option_type"] == "put",
+            "volume",
+        ].sum()
+    )
+    total_volume = call_volume + put_volume
+    dominant_side = "call" if call_volume >= put_volume else "put"
+
+    return {
+        "date": today.strftime("%Y-%m-%d"),
+        "ticker": ticker,
+        "call_volume": call_volume,
+        "put_volume": put_volume,
+        "one_day_volume": total_volume,
+        "dominant_side": dominant_side,
+    }
+
+
+def build_market_volume_table(tickers, lookback_days=7):
     today = pd.Timestamp.now().normalize()
     daily_rows = []
 
-    for ticker in tickers:
-        try:
-            snapshot = get_full_market_options_snapshot(ticker)
-        except Exception:
-            snapshot = pd.DataFrame()
-
-        if snapshot.empty:
-            continue
-
-        call_volume = int(
-            snapshot.loc[
-                snapshot["option_type"] == "call",
-                "volume",
-            ].sum()
-        )
-        put_volume = int(
-            snapshot.loc[
-                snapshot["option_type"] == "put",
-                "volume",
-            ].sum()
-        )
-        total_volume = call_volume + put_volume
-
-        dominant_side = "call" if call_volume >= put_volume else "put"
-
-        daily_rows.append(
-            {
-                "date": today.strftime("%Y-%m-%d"),
-                "ticker": ticker,
-                "call_volume": call_volume,
-                "put_volume": put_volume,
-                "one_day_volume": total_volume,
-                "dominant_side": dominant_side,
-            }
-        )
+    with ThreadPoolExecutor(max_workers=min(_MAX_WORKERS, len(tickers) or 1)) as pool:
+        futures = [pool.submit(_fetch_volume_row, ticker, today) for ticker in tickers]
+        for future in as_completed(futures):
+            row = future.result()
+            if row:
+                daily_rows.append(row)
 
     daily_df = pd.DataFrame(daily_rows)
 
@@ -294,92 +364,90 @@ def build_market_volume_table(tickers, lookback_days=7):
     return result
 
 
-def build_market_movers_table(tickers):
+def _build_mover_row(ticker):
+    try:
+        history = get_price_history(ticker, period="6mo", interval="1d")
+    except Exception:
+        history = pd.DataFrame()
 
+    if history is None or history.empty:
+        return None
+
+    features = build_features(history)
+
+    if features.empty:
+        return None
+
+    latest = features.iloc[-1]
+    close_price = float(pd.to_numeric(latest["Close"], errors="coerce"))
+    ret_5d = float(pd.to_numeric(latest["close_ret_5d"], errors="coerce"))
+    ret_3d = float(pd.to_numeric(latest["close_ret_3d"], errors="coerce"))
+    vol_5d = float(pd.to_numeric(latest["volatility_5d"], errors="coerce"))
+    vol_10d = float(pd.to_numeric(latest["volatility_10d"], errors="coerce"))
+    volume_ratio_5 = float(pd.to_numeric(latest["volume_ratio_5"], errors="coerce"))
+    volume_ratio_20 = float(pd.to_numeric(latest["volume_ratio_20"], errors="coerce"))
+    dist_ma_20 = float(pd.to_numeric(latest["dist_ma_20_pct"], errors="coerce"))
+    dist_ema_20 = float(pd.to_numeric(latest["dist_ema_20_pct"], errors="coerce"))
+
+    swing_factor = ((vol_5d * 0.6) + (vol_10d * 0.4))
+    volume_factor = ((volume_ratio_5 * 0.6) + (volume_ratio_20 * 0.4))
+    trend_factor = ((ret_5d * 0.65) + (ret_3d * 0.35))
+    extension_factor = ((dist_ma_20 * 0.6) + (dist_ema_20 * 0.4))
+
+    one_week_upside = (
+        trend_factor * 0.9
+        + swing_factor * 0.8
+        + max(volume_factor - 1, 0) * 6
+        + max(extension_factor, 0) * 0.35
+    )
+    one_week_downside = (
+        (-trend_factor) * 0.9
+        + swing_factor * 0.8
+        + max(volume_factor - 1, 0) * 6
+        + max(-extension_factor, 0) * 0.35
+    )
+
+    one_month_upside = (
+        trend_factor * 1.1
+        + swing_factor * 0.9
+        + max(volume_factor - 1, 0) * 8
+        + max(extension_factor, 0) * 0.45
+    )
+    one_month_downside = (
+        (-trend_factor) * 1.1
+        + swing_factor * 0.9
+        + max(volume_factor - 1, 0) * 8
+        + max(-extension_factor, 0) * 0.45
+    )
+
+    direction_1w = "Grow Rapidly" if one_week_upside >= one_week_downside else "Fall Steeply"
+    direction_1m = "Grow Rapidly" if one_month_upside >= one_month_downside else "Fall Steeply"
+
+    one_week_score = max(one_week_upside, one_week_downside)
+    one_month_score = max(one_month_upside, one_month_downside)
+
+    return {
+        "ticker": ticker,
+        "close": round(close_price, 2),
+        "one_week_view": direction_1w,
+        "one_week_score": round(one_week_score, 2),
+        "one_month_view": direction_1m,
+        "one_month_score": round(one_month_score, 2),
+        "ret_5d": round(ret_5d, 2),
+        "volatility_5d": round(vol_5d, 2),
+        "volume_ratio_5": round(volume_ratio_5, 2),
+    }
+
+
+def build_market_movers_table(tickers):
     rows = []
 
-    for ticker in tickers:
-        try:
-            history = yf.download(
-                ticker,
-                period="6mo",
-                interval="1d",
-                progress=False,
-                auto_adjust=False,
-                threads=False,
-            )
-        except Exception:
-            history = pd.DataFrame()
-
-        if history is None or history.empty:
-            continue
-
-        features = build_features(history)
-
-        if features.empty:
-            continue
-
-        latest = features.iloc[-1]
-        close_price = float(pd.to_numeric(latest["Close"], errors="coerce"))
-        ret_5d = float(pd.to_numeric(latest["close_ret_5d"], errors="coerce"))
-        ret_3d = float(pd.to_numeric(latest["close_ret_3d"], errors="coerce"))
-        vol_5d = float(pd.to_numeric(latest["volatility_5d"], errors="coerce"))
-        vol_10d = float(pd.to_numeric(latest["volatility_10d"], errors="coerce"))
-        volume_ratio_5 = float(pd.to_numeric(latest["volume_ratio_5"], errors="coerce"))
-        volume_ratio_20 = float(pd.to_numeric(latest["volume_ratio_20"], errors="coerce"))
-        dist_ma_20 = float(pd.to_numeric(latest["dist_ma_20_pct"], errors="coerce"))
-        dist_ema_20 = float(pd.to_numeric(latest["dist_ema_20_pct"], errors="coerce"))
-
-        swing_factor = ((vol_5d * 0.6) + (vol_10d * 0.4))
-        volume_factor = ((volume_ratio_5 * 0.6) + (volume_ratio_20 * 0.4))
-        trend_factor = ((ret_5d * 0.65) + (ret_3d * 0.35))
-        extension_factor = ((dist_ma_20 * 0.6) + (dist_ema_20 * 0.4))
-
-        one_week_upside = (
-            trend_factor * 0.9
-            + swing_factor * 0.8
-            + max(volume_factor - 1, 0) * 6
-            + max(extension_factor, 0) * 0.35
-        )
-        one_week_downside = (
-            (-trend_factor) * 0.9
-            + swing_factor * 0.8
-            + max(volume_factor - 1, 0) * 6
-            + max(-extension_factor, 0) * 0.35
-        )
-
-        one_month_upside = (
-            trend_factor * 1.1
-            + swing_factor * 0.9
-            + max(volume_factor - 1, 0) * 8
-            + max(extension_factor, 0) * 0.45
-        )
-        one_month_downside = (
-            (-trend_factor) * 1.1
-            + swing_factor * 0.9
-            + max(volume_factor - 1, 0) * 8
-            + max(-extension_factor, 0) * 0.45
-        )
-
-        direction_1w = "Grow Rapidly" if one_week_upside >= one_week_downside else "Fall Steeply"
-        direction_1m = "Grow Rapidly" if one_month_upside >= one_month_downside else "Fall Steeply"
-
-        one_week_score = max(one_week_upside, one_week_downside)
-        one_month_score = max(one_month_upside, one_month_downside)
-
-        rows.append(
-            {
-                "ticker": ticker,
-                "close": round(close_price, 2),
-                "one_week_view": direction_1w,
-                "one_week_score": round(one_week_score, 2),
-                "one_month_view": direction_1m,
-                "one_month_score": round(one_month_score, 2),
-                "ret_5d": round(ret_5d, 2),
-                "volatility_5d": round(vol_5d, 2),
-                "volume_ratio_5": round(volume_ratio_5, 2),
-            }
-        )
+    with ThreadPoolExecutor(max_workers=min(_MAX_WORKERS, len(tickers) or 1)) as pool:
+        futures = [pool.submit(_build_mover_row, ticker) for ticker in tickers]
+        for future in as_completed(futures):
+            row = future.result()
+            if row:
+                rows.append(row)
 
     movers_df = pd.DataFrame(rows)
 
@@ -395,7 +463,6 @@ def build_market_movers_table(tickers):
 
 
 def _get_strategy_expiration(ticker, min_days=21, max_days=45):
-
     expirations = get_expirations(ticker)
 
     if not expirations:
@@ -432,7 +499,6 @@ def _get_strategy_expiration(ticker, min_days=21, max_days=45):
 
 
 def _pick_strategy_contract(ticker, contract_type, close_price):
-
     expiry = _get_strategy_expiration(ticker)
 
     if expiry is None:
@@ -516,8 +582,58 @@ def _pick_strategy_contract(ticker, contract_type, close_price):
     }
 
 
-def build_strategy_table(tickers, top_n=10):
+def _build_strategy_recommendation(row):
+    contract = _pick_strategy_contract(
+        row["ticker"],
+        row["contract_type"],
+        row["close"],
+    )
 
+    if not contract:
+        return None
+
+    underlying_move_pct = abs(float(row["ret_5d"]))
+    contract_side = contract["contract_type"]
+    entry_rule = (
+        "Enter only if price confirms the opening move and option spread stays tight."
+    )
+    stop_rule = (
+        "Exit if premium drops 20% from entry or if the underlying reverses the morning trend."
+    )
+    take_profit_rule = (
+        "Take profit into 15%-25% premium gains and trail the rest only if momentum remains strong."
+    )
+    midday_rule = (
+        "Recheck near 11 AM; avoid new entries if volume fades and price stalls."
+    )
+
+    return {
+        "ticker": row["ticker"],
+        "view": row["signal_direction"],
+        "contract_type": contract["contract_type"],
+        "expiration": contract["expiration"],
+        "strike_price": contract["strike"],
+        "option_value": contract["option_value"],
+        "bid": contract["bid"],
+        "ask": contract["ask"],
+        "spread_pct": contract["spread_pct"],
+        "open_interest": contract["open_interest"],
+        "option_volume": contract["volume"],
+        "contract_quality_score": contract["contract_quality_score"],
+        "strategy_score": round(float(row["strategy_score"]), 2),
+        "day_volume_share": round(float(row["percent_of_day_total"]), 2),
+        "underlying_5d_move": round(underlying_move_pct, 2),
+        "entry_rule": entry_rule,
+        "stop_rule": stop_rule,
+        "take_profit_rule": take_profit_rule,
+        "midday_check": midday_rule,
+        "daily_plan": (
+            f"Bias {contract_side} on morning confirmation, then reassess at 11 AM."
+        ),
+    }
+
+
+def build_strategy_table(tickers, top_n=10):
     movers_df = build_market_movers_table(tickers)
     volume_df = build_market_volume_table(tickers)
 
@@ -555,14 +671,9 @@ def build_strategy_table(tickers, top_n=10):
     )
     diagnostics["combined_candidates"] = len(combined)
 
-    combined["signal_direction"] = combined.apply(
-        lambda row: (
-            row["one_month_view"]
-            if row["one_month_score"] >= row["one_week_score"]
-            else row["one_week_view"]
-        ),
-        axis=1,
-    )
+    use_month_view = combined["one_month_score"] >= combined["one_week_score"]
+    combined["signal_direction"] = combined["one_week_view"]
+    combined.loc[use_month_view, "signal_direction"] = combined.loc[use_month_view, "one_month_view"]
     combined["contract_type"] = combined["signal_direction"].map(
         {
             "Grow Rapidly": "call",
@@ -574,70 +685,40 @@ def build_strategy_table(tickers, top_n=10):
         + combined["one_month_score"] * 0.45
         + combined["percent_of_day_total"].fillna(0) * 0.20
     )
+    combined["signal_strength"] = combined[["one_week_score", "one_month_score"]].max(axis=1)
 
     combined = combined.sort_values(
-        ["strategy_score", "one_day_volume"],
-        ascending=[False, False],
+        ["strategy_score", "signal_strength", "one_day_volume"],
+        ascending=[False, False, False],
     )
 
+    candidate_limit = min(len(combined), max(top_n * 3, top_n + 4, 12))
+    candidates = combined.head(candidate_limit).copy()
+
     recommendations = []
+    max_workers = min(6, len(candidates) or 1)
 
-    for _, row in combined.head(top_n * 2).iterrows():
-        diagnostics["contracts_evaluated"] += 1
-        contract = _pick_strategy_contract(
-            row["ticker"],
-            row["contract_type"],
-            row["close"],
-        )
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = [
+            pool.submit(_build_strategy_recommendation, row)
+            for _, row in candidates.iterrows()
+        ]
 
-        if not contract:
-            continue
+        diagnostics["contracts_evaluated"] = len(futures)
 
-        underlying_move_pct = abs(float(row["ret_5d"]))
-        contract_side = contract["contract_type"]
-        entry_rule = (
-            "Enter only if price confirms the opening move and option spread stays tight."
-        )
-        stop_rule = (
-            "Exit if premium drops 20% from entry or if the underlying reverses the morning trend."
-        )
-        take_profit_rule = (
-            "Take profit into 15%-25% premium gains and trail the rest only if momentum remains strong."
-        )
-        midday_rule = (
-            "Recheck near 11 AM; avoid new entries if volume fades and price stalls."
-        )
+        for future in as_completed(futures):
+            recommendation = future.result()
+            if recommendation:
+                recommendations.append(recommendation)
 
-        recommendations.append(
-            {
-                "ticker": row["ticker"],
-                "view": row["signal_direction"],
-                "contract_type": contract["contract_type"],
-                "expiration": contract["expiration"],
-                "strike_price": contract["strike"],
-                "option_value": contract["option_value"],
-                "bid": contract["bid"],
-                "ask": contract["ask"],
-                "spread_pct": contract["spread_pct"],
-                "open_interest": contract["open_interest"],
-                "option_volume": contract["volume"],
-                "contract_quality_score": contract["contract_quality_score"],
-                "strategy_score": round(float(row["strategy_score"]), 2),
-                "day_volume_share": round(float(row["percent_of_day_total"]), 2),
-                "underlying_5d_move": round(underlying_move_pct, 2),
-                "entry_rule": entry_rule,
-                "stop_rule": stop_rule,
-                "take_profit_rule": take_profit_rule,
-                "midday_check": midday_rule,
-                "daily_plan": (
-                    f"Bias {contract_side} on morning confirmation, then reassess at 11 AM."
-                ),
-            }
-        )
-        diagnostics["contracts_selected"] += 1
+    if recommendations:
+        recommendations = sorted(
+            recommendations,
+            key=lambda item: (item["strategy_score"], item["contract_quality_score"]),
+            reverse=True,
+        )[:top_n]
 
-        if len(recommendations) >= top_n:
-            break
+    diagnostics["contracts_selected"] = len(recommendations)
 
     if not recommendations:
         diagnostics["status"] = "no_contracts"

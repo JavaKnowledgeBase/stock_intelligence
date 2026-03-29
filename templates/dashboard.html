@@ -4,7 +4,7 @@
     <title>Stock Prediction Dashboard</title>
     <style>
         body {
-            font-family: Arial;
+            font-family: Arial, sans-serif;
             background: #0f172a;
             color: white;
             padding: 40px;
@@ -17,6 +17,14 @@
         }
         .bullish { color: #22c55e; }
         .bearish { color: #ef4444; }
+        .tag {
+            display: inline-block;
+            padding: 4px 10px;
+            border-radius: 999px;
+            font-size: 14px;
+            background: #334155;
+            color: #e2e8f0;
+        }
         h1 { margin-bottom: 30px; }
         .metric { margin-bottom: 12px; font-size: 18px; }
     </style>
@@ -32,12 +40,8 @@
 
         <div class="metric"><strong>Predicted High:</strong> ${{ data.predicted_high }}</div>
         <div class="metric"><strong>Predicted Low:</strong> ${{ data.predicted_low }}</div>
-        <div class="metric"><strong>Predicted Close:</strong> ${{ data.predicted_close }}</div>
-
-        <hr>
-
-        <div class="metric"><strong>Expected Volatility:</strong> {{ data.expected_volatility_percent }}%</div>
         <div class="metric"><strong>Predicted Range:</strong> {{ data.predicted_range_percent }}%</div>
+        <div class="metric"><strong>Predicted Dollars:</strong> ${{ data.predicted_range_dollars }}</div>
 
         <div class="metric">
             <strong>Direction:</strong>
@@ -46,32 +50,17 @@
             </span>
         </div>
 
+        <div class="metric">
+            <strong>Prediction Source:</strong>
+            <span class="tag">{{ data.prediction_source }}</span>
+        </div>
+
         <hr>
 
+        <div class="metric"><strong>Model:</strong> {{ data.model_name }}</div>
         <div class="metric"><strong>Model MAE:</strong> {{ data.model_mae }}</div>
+        <div class="metric"><strong>Baseline MAE:</strong> {{ data.baseline_mae }}</div>
         <div class="metric"><strong>Confidence Score:</strong> {{ data.confidence_score }}</div>
-        <div class="metric"><strong>Historical Avg Range:</strong> {{ data.historical_average_range_percent }}%</div>
-        <div class="metric"><strong>ATR Comparison:</strong> {{ data.atr_comparison_ratio }}</div>
     </div>
-
-<hr>
-
-<div class="metric">
-    <strong>Next Mega Millions using Double Random:</strong><br>
-    {% for num in data.mega_millions_double_random %}
-        <span style="margin-right:10px; font-size:20px;">🎱 {{ num }}</span>
-    {% endfor %}
-</div>
-
-<div class="metric">
-    <strong>Next Mega Millions using Deep AI:</strong><br>
-    {% for num in data.mega_millions_deep_ai %}
-        <span style="margin-right:10px; font-size:20px; color:#38bdf8;">
-            🤖 {{ num }}
-        </span>
-    {% endfor %}
-</div>
-
-
 </body>
 </html>
