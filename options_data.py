@@ -18,6 +18,21 @@ from config import DATA_DIR
 from build_features import build_features
 
 _CACHE_TTL_SECONDS = 900
+_PRICE_COLS = {"Open", "High", "Low", "Close", "Volume", "Adj Close"}
+
+
+def _flatten_df_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Robustly flatten yfinance MultiIndex columns regardless of level order."""
+    if not isinstance(df.columns, pd.MultiIndex):
+        return df
+    df = df.copy()
+    for level in range(df.columns.nlevels):
+        level_vals = set(df.columns.get_level_values(level))
+        if _PRICE_COLS & level_vals:
+            df.columns = df.columns.get_level_values(level)
+            return df
+    df.columns = [col[0] if isinstance(col, tuple) else str(col) for col in df.columns]
+    return df
 _CACHE_LOCK = threading.Lock()
 _CACHE = {}
 _MAX_WORKERS = 8
@@ -368,9 +383,7 @@ def build_market_volume_table(tickers, lookback_days=7):
 def _get_spy_ret_5d():
     """Cached 5-day SPY return for relative strength calculation."""
     try:
-        spy = get_price_history("SPY", period="1mo", interval="1d")
-        if isinstance(spy.columns, pd.MultiIndex):
-            spy.columns = [c[0] for c in spy.columns]
+        spy = _flatten_df_columns(get_price_history("SPY", period="1mo", interval="1d"))
         close = pd.to_numeric(spy["Close"], errors="coerce").dropna()
         if len(close) < 6:
             return 0.0
@@ -419,9 +432,7 @@ def _build_mover_row(ticker):
 
     # 30-day annualized historical volatility
     try:
-        _flat = history.copy()
-        if isinstance(_flat.columns, pd.MultiIndex):
-            _flat.columns = [c[0] for c in _flat.columns]
+        _flat = _flatten_df_columns(history.copy())
         _close = pd.to_numeric(_flat["Close"], errors="coerce").dropna()
         _log_ret = np.log(_close / _close.shift(1)).dropna()
         hv_30d = float(_log_ret.tail(30).std() * np.sqrt(252) * 100)
@@ -878,8 +889,7 @@ def _get_market_regime():
         spy = get_price_history("SPY", period="3mo", interval="1d")
         if spy is None or spy.empty:
             return "neutral"
-        if isinstance(spy.columns, pd.MultiIndex):
-            spy.columns = [c[0] for c in spy.columns]
+        spy = _flatten_df_columns(spy)
         close = pd.to_numeric(spy["Close"], errors="coerce").dropna()
         if len(close) < 20:
             return "neutral"

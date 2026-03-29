@@ -8,13 +8,21 @@ range prediction.
 import pandas as pd
 
 
+_PRICE_COLS = {"Open", "High", "Low", "Close", "Volume", "Adj Close"}
+
+
 def _flatten_columns(df: pd.DataFrame) -> pd.DataFrame:
-    if isinstance(df.columns, pd.MultiIndex):
-        df = df.copy()
-        df.columns = [
-            col[0] if isinstance(col, tuple) and col[0] else str(col)
-            for col in df.columns
-        ]
+    if not isinstance(df.columns, pd.MultiIndex):
+        return df
+    df = df.copy()
+    # Find whichever MultiIndex level contains the actual price column names
+    for level in range(df.columns.nlevels):
+        level_vals = set(df.columns.get_level_values(level))
+        if _PRICE_COLS & level_vals:
+            df.columns = df.columns.get_level_values(level)
+            return df
+    # Fallback: use level 0
+    df.columns = [col[0] if isinstance(col, tuple) else str(col) for col in df.columns]
     return df
 
 
