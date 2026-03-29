@@ -6,6 +6,7 @@ range prediction.
 """
 
 import pandas as pd
+import numpy as np
 
 
 _PRICE_COLS = {"Open", "High", "Low", "Close", "Volume", "Adj Close"}
@@ -41,7 +42,13 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     """
     Build technical features from daily OHLCV data.
     """
+    try:
+        return _build_features_inner(df)
+    except Exception:
+        return pd.DataFrame()
 
+
+def _build_features_inner(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame()
 
@@ -59,6 +66,11 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame()
 
     daily = df.copy()
+
+    # Force all OHLCV to float64 to prevent any object-dtype arithmetic
+    for col in ["Open", "High", "Low", "Close", "Volume"]:
+        daily[col] = daily[col].astype(float)
+
     price_range = (daily["High"] - daily["Low"]).replace(0, pd.NA)
     prev_close = daily["Close"].shift(1).replace(0, pd.NA)
 
@@ -136,13 +148,13 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
         (daily["High"] - _prev_close).abs(),
         (daily["Low"] - _prev_close).abs(),
     ], axis=1).max(axis=1)
-    _dm_plus_raw = daily["High"] - _prev_high
-    _dm_minus_raw = _prev_low - daily["Low"]
+    _dm_plus_raw = (daily["High"] - _prev_high).astype(float)
+    _dm_minus_raw = (_prev_low - daily["Low"]).astype(float)
     _plus_dm = _dm_plus_raw.where(
-        (_dm_plus_raw > _dm_minus_raw) & (_dm_plus_raw > 0), 0
+        (_dm_plus_raw > _dm_minus_raw) & (_dm_plus_raw > 0), 0.0
     )
     _minus_dm = _dm_minus_raw.where(
-        (_dm_minus_raw > _dm_plus_raw) & (_dm_minus_raw > 0), 0
+        (_dm_minus_raw > _dm_plus_raw) & (_dm_minus_raw > 0), 0.0
     )
     _atr14 = _tr.ewm(alpha=1 / 14, adjust=False).mean()
     daily["atr_14"] = _atr14
@@ -161,22 +173,22 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     )
 
     # Trend consistency: fraction of last 10 days with positive close return
-    daily["trend_consistency_10d"] = (daily["close_ret_1d"] > 0).rolling(10).mean()
+    _ret_pos = (daily["close_ret_1d"] > 0).astype(float)
+    daily["trend_consistency_10d"] = _ret_pos.rolling(10).mean()
 
     # Volume direction ratio: up-day volume vs down-day volume over last 10 days
-    _up_vol = (daily["Volume"] * (daily["close_ret_1d"] > 0)).rolling(10).sum()
-    _dn_vol = (daily["Volume"] * (daily["close_ret_1d"] <= 0)).rolling(10).sum()
-    daily["vol_direction_ratio"] = _up_vol / _dn_vol.replace(0, pd.NA)
+    _up_vol = (daily["Volume"] * (daily["close_ret_1d"] > 0).astype(float)).rolling(10).sum()
+    _dn_vol = (daily["Volume"] * (daily["close_ret_1d"] <= 0).astype(float)).rolling(10).sum()
+    daily["vol_direction_ratio"] = _up_vol / _dn_vol.where(_dn_vol > 0)
 
     # OBV and OBV slope (10-day % change)
-    # Use boolean arithmetic to guarantee numeric dtype (avoids object Series from apply)
     _close_diff = daily["Close"].diff()
-    _obv_direction = ((_close_diff > 0).astype(int) - (_close_diff < 0).astype(int))
-    _obv = (daily["Volume"].astype(float) * _obv_direction).cumsum()
+    _obv_direction = ((_close_diff > 0).astype(float) - (_close_diff < 0).astype(float))
+    _obv = (daily["Volume"] * _obv_direction).cumsum()
     daily["obv"] = _obv
-    _obv_10_ago = _obv.shift(10)
-    _obv_10_ago_safe = _obv_10_ago.where(_obv_10_ago.abs() > 0)  # NaN where 0
-    daily["obv_slope_10d"] = (_obv - _obv_10_ago) / _obv_10_ago_safe.abs() * 100
+    _obv_prev = _obv.shift(10)
+    _obv_prev_safe = _obv_prev.where(_obv_prev.abs() > 0)
+    daily["obv_slope_10d"] = (_obv - _obv_prev) / _obv_prev_safe.abs() * 100
 
     # 52-week high/low proximity (% from rolling high/low using available history)
     _lookback = min(252, len(daily))

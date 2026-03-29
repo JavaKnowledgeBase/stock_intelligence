@@ -394,6 +394,13 @@ def _get_spy_ret_5d():
 
 def _build_mover_row(ticker):
     try:
+        return _build_mover_row_inner(ticker)
+    except Exception:
+        return None
+
+
+def _build_mover_row_inner(ticker):
+    try:
         history = get_price_history(ticker, period="1y", interval="1d")
     except Exception:
         history = pd.DataFrame()
@@ -403,7 +410,7 @@ def _build_mover_row(ticker):
 
     features = build_features(history)
 
-    if features.empty:
+    if features is None or features.empty:
         return None
 
     latest = features.iloc[-1]

@@ -447,7 +447,7 @@ with tab4:
                 )
                 st.session_state["strategy_fetched_at"] = _now()
             except Exception as e:
-                st.error(f"Strategy run failed: {e}")
+                st.warning(f"Strategy scan encountered an error: {e}. Showing any partial results.")
 
     strategy_df = st.session_state["strategy_df"]
     strategy_diagnostics = st.session_state["strategy_diagnostics"]
@@ -648,7 +648,7 @@ with tab6:
                 st.session_state["forecast_losers_df"] = losers
                 st.session_state["forecast_fetched_at"] = _now()
             except Exception as e:
-                st.error(f"Forecast failed: {e}")
+                st.warning(f"Forecast encountered an error: {e}. Showing any partial results.")
 
     gainers_df = st.session_state["forecast_gainers_df"]
     losers_df = st.session_state["forecast_losers_df"]
