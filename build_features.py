@@ -137,6 +137,7 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
         (_dm_minus_raw > _dm_plus_raw) & (_dm_minus_raw > 0), 0
     )
     _atr14 = _tr.ewm(alpha=1 / 14, adjust=False).mean()
+    daily["atr_14"] = _atr14
     _plus_di14 = 100 * _plus_dm.ewm(alpha=1 / 14, adjust=False).mean() / _atr14.replace(0, pd.NA)
     _minus_di14 = 100 * _minus_dm.ewm(alpha=1 / 14, adjust=False).mean() / _atr14.replace(0, pd.NA)
     _di_sum = (_plus_di14 + _minus_di14).replace(0, pd.NA)
@@ -158,6 +159,20 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     _up_vol = (daily["Volume"] * (daily["close_ret_1d"] > 0)).rolling(10).sum()
     _dn_vol = (daily["Volume"] * (daily["close_ret_1d"] <= 0)).rolling(10).sum()
     daily["vol_direction_ratio"] = _up_vol / _dn_vol.replace(0, pd.NA)
+
+    # OBV and OBV slope (10-day % change)
+    _obv_direction = daily["Close"].diff().apply(lambda x: 1 if x > 0 else (-1 if x < 0 else 0))
+    _obv = (daily["Volume"] * _obv_direction).cumsum()
+    daily["obv"] = _obv
+    _obv_10_ago = _obv.shift(10).replace(0, pd.NA)
+    daily["obv_slope_10d"] = (_obv - _obv.shift(10)) / _obv_10_ago.abs() * 100
+
+    # 52-week high/low proximity (% from rolling high/low using available history)
+    _lookback = min(252, len(daily))
+    daily["high_52w"] = daily["High"].rolling(window=_lookback, min_periods=20).max()
+    daily["low_52w"] = daily["Low"].rolling(window=_lookback, min_periods=20).min()
+    daily["pct_from_52w_high"] = (daily["Close"] - daily["high_52w"]) / daily["high_52w"] * 100
+    daily["pct_from_52w_low"] = (daily["Close"] - daily["low_52w"]) / daily["low_52w"] * 100
 
     for lag in [1, 2, 3, 5]:
         daily[f"hl_pct_lag_{lag}"] = daily["hl_pct"].shift(lag)

@@ -365,9 +365,23 @@ def build_market_volume_table(tickers, lookback_days=7):
     return result
 
 
+def _get_spy_ret_5d():
+    """Cached 5-day SPY return for relative strength calculation."""
+    try:
+        spy = get_price_history("SPY", period="1mo", interval="1d")
+        if isinstance(spy.columns, pd.MultiIndex):
+            spy.columns = [c[0] for c in spy.columns]
+        close = pd.to_numeric(spy["Close"], errors="coerce").dropna()
+        if len(close) < 6:
+            return 0.0
+        return float((close.iloc[-1] - close.iloc[-6]) / close.iloc[-6] * 100)
+    except Exception:
+        return 0.0
+
+
 def _build_mover_row(ticker):
     try:
-        history = get_price_history(ticker, period="6mo", interval="1d")
+        history = get_price_history(ticker, period="1y", interval="1d")
     except Exception:
         history = pd.DataFrame()
 
@@ -395,6 +409,13 @@ def _build_mover_row(ticker):
     ma_alignment = int(pd.to_numeric(latest.get("ma_alignment", 0), errors="coerce"))
     trend_consistency = float(pd.to_numeric(latest.get("trend_consistency_10d", 0.5), errors="coerce"))
     vol_dir_ratio = float(pd.to_numeric(latest.get("vol_direction_ratio", 1.0), errors="coerce"))
+    atr_14 = float(pd.to_numeric(latest.get("atr_14", 0), errors="coerce"))
+    obv_slope = float(pd.to_numeric(latest.get("obv_slope_10d", 0), errors="coerce"))
+    pct_from_52w_high = float(pd.to_numeric(latest.get("pct_from_52w_high", -50), errors="coerce"))
+
+    # Relative strength vs SPY (ticker 5d return minus SPY 5d return)
+    spy_ret_5d = _get_spy_ret_5d()
+    rel_strength = ret_5d - spy_ret_5d
 
     # 30-day annualized historical volatility
     try:
@@ -434,12 +455,25 @@ def _build_mover_row(ticker):
     vd_adj_up = 1.0 if vol_dir_ratio > 1.2 else (-1.0 if vol_dir_ratio < 0.8 else 0.0)
     vd_adj_dn = -vd_adj_up
 
+    # OBV slope: accumulation (+) vs distribution (-)
+    obv_adj_up = 0.75 if obv_slope > 5 else (-0.75 if obv_slope < -5 else 0.0)
+    obv_adj_dn = -obv_adj_up
+
+    # 52-week high proximity: near highs = breakout potential; far from highs = laggard
+    high52_adj_up = 1.0 if pct_from_52w_high >= -3 else (-0.5 if pct_from_52w_high < -20 else 0.0)
+    high52_adj_dn = 0.5 if pct_from_52w_high < -20 else (-1.0 if pct_from_52w_high >= -3 else 0.0)
+
+    # Relative strength vs SPY
+    rs_adj_up = 1.0 if rel_strength > 2 else (-1.0 if rel_strength < -2 else 0.0)
+    rs_adj_dn = -rs_adj_up
+
     one_week_upside = (
         trend_factor * 0.9
         + swing_factor * 0.8
         + max(volume_factor - 1, 0) * 6
         + max(extension_factor, 0) * 0.35
         + rsi_adj_up + macd_adj + adx_strength + ma_adj_up + tc_adj_up + vd_adj_up
+        + obv_adj_up + high52_adj_up + rs_adj_up
     )
     one_week_downside = (
         (-trend_factor) * 0.9
@@ -447,6 +481,7 @@ def _build_mover_row(ticker):
         + max(volume_factor - 1, 0) * 6
         + max(-extension_factor, 0) * 0.35
         + rsi_adj_dn + (-macd_adj) + adx_strength + ma_adj_dn + tc_adj_dn + vd_adj_dn
+        + obv_adj_dn + high52_adj_dn + rs_adj_dn
     )
 
     one_month_upside = (
@@ -455,6 +490,7 @@ def _build_mover_row(ticker):
         + max(volume_factor - 1, 0) * 8
         + max(extension_factor, 0) * 0.45
         + rsi_adj_up + macd_adj + adx_strength + ma_adj_up + tc_adj_up + vd_adj_up
+        + obv_adj_up + high52_adj_up + rs_adj_up
     )
     one_month_downside = (
         (-trend_factor) * 1.1
@@ -462,6 +498,7 @@ def _build_mover_row(ticker):
         + max(volume_factor - 1, 0) * 8
         + max(-extension_factor, 0) * 0.45
         + rsi_adj_dn + (-macd_adj) + adx_strength + ma_adj_dn + tc_adj_dn + vd_adj_dn
+        + obv_adj_dn + high52_adj_dn + rs_adj_dn
     )
 
     direction_1w = "Grow Rapidly" if one_week_upside >= one_week_downside else "Fall Steeply"
@@ -482,6 +519,10 @@ def _build_mover_row(ticker):
         "volume_ratio_5": round(volume_ratio_5, 2),
         "rsi_14": round(rsi_14, 1),
         "adx_14": round(adx_14, 1),
+        "atr_14": round(atr_14, 3),
+        "rel_strength_vs_spy": round(rel_strength, 2),
+        "pct_from_52w_high": round(pct_from_52w_high, 2),
+        "obv_slope_10d": round(obv_slope, 2),
         "hv_30d": round(hv_30d, 2),
     }
 
@@ -758,9 +799,21 @@ def _build_strategy_recommendation(row):
 
     mid_price = (contract["bid"] + contract["ask"]) / 2 if contract["ask"] > 0 else contract["option_value"]
     mid_price = round(mid_price, 2)
-    stop_price = round(mid_price * 0.80, 2)
-    target_1 = round(mid_price * 1.20, 2)
-    target_2 = round(mid_price * 1.40, 2)
+
+    # ATR-based stop/target sizing: use ticker ATR scaled to option price
+    atr_14 = float(row.get("atr_14", 0) or 0)
+    close_price = float(row.get("close", 1) or 1)
+    atr_pct = (atr_14 / close_price) if close_price > 0 else 0.02
+    # Stop = 1.5× ATR from entry; targets = 2× and 3× ATR, bounded to 15%–35%
+    stop_mult = max(0.15, min(0.30, atr_pct * 1.5))
+    t1_mult = max(0.20, min(0.35, atr_pct * 2.0))
+    t2_mult = max(0.30, min(0.50, atr_pct * 3.0))
+    stop_price = round(mid_price * (1 - stop_mult), 2)
+    target_1 = round(mid_price * (1 + t1_mult), 2)
+    target_2 = round(mid_price * (1 + t2_mult), 2)
+    stop_pct = round(stop_mult * 100)
+    t1_pct = round(t1_mult * 100)
+    t2_pct = round(t2_mult * 100)
 
     entry_rule = (
         f"Enter near open if {ticker} confirms direction. "
@@ -772,12 +825,12 @@ def _build_strategy_recommendation(row):
         entry_rule += f" RSI oversold ({rsi:.0f}) — wait for stabilization before entering."
 
     stop_rule = (
-        f"Stop loss at ${stop_price:.2f} (−20% from entry). "
+        f"Stop loss at ${stop_price:.2f} (−{stop_pct}% from entry, 1.5× ATR). "
         f"Exit immediately if {ticker} reverses the morning trend."
     )
     take_profit_rule = (
-        f"Take 50% off at ${target_1:.2f} (+20%). "
-        f"Trail remainder to ${target_2:.2f} (+40%) if momentum holds."
+        f"Take 50% off at ${target_1:.2f} (+{t1_pct}%, 2× ATR). "
+        f"Trail remainder to ${target_2:.2f} (+{t2_pct}%, 3× ATR) if momentum holds."
     )
     midday_rule = (
         f"At 11 AM check {ticker} volume vs open. "
