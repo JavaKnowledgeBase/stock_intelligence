@@ -509,6 +509,59 @@ def build_market_movers_table(tickers):
     return movers_df
 
 
+def build_price_forecast_table(tickers, top_n=10):
+    """
+    Return two DataFrames (gainers, losers) each with top_n tickers,
+    estimated % move for next week and next 2 weeks derived from
+    technical momentum scores.
+    """
+    movers_df = build_market_movers_table(tickers)
+
+    if movers_df is None or movers_df.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    df = movers_df.copy()
+
+    # 2-week score: blend of 1-week and 1-month
+    df["two_week_score"] = df["one_week_score"] * 0.6 + df["one_month_score"] * 0.4
+
+    # Convert scores to % estimates, capped by each ticker's own volatility range
+    vol_cap = (df["volatility_5d"] * 5).clip(lower=2.0)
+
+    df["est_1w_pct"] = (df["one_week_score"] * 0.35).clip(upper=vol_cap)
+    df["est_2w_pct"] = (df["two_week_score"] * 0.45).clip(upper=vol_cap * 1.4)
+
+    # Apply direction sign
+    up_mask_1w = df["one_week_view"] == "Grow Rapidly"
+    up_mask_2w = df["one_month_view"] == "Grow Rapidly"
+
+    df["est_1w_pct"] = df["est_1w_pct"].where(up_mask_1w, -df["est_1w_pct"])
+    df["est_2w_pct"] = df["est_2w_pct"].where(up_mask_2w, -df["est_2w_pct"])
+
+    df["est_1w_pct"] = df["est_1w_pct"].round(2)
+    df["est_2w_pct"] = df["est_2w_pct"].round(2)
+
+    display_cols = [
+        "ticker", "close", "one_week_view", "est_1w_pct",
+        "est_2w_pct", "rsi_14", "adx_14", "volatility_5d", "volume_ratio_5",
+    ]
+
+    gainers = (
+        df[df["est_1w_pct"] > 0]
+        .sort_values("est_1w_pct", ascending=False)
+        .head(top_n)[display_cols]
+        .reset_index(drop=True)
+    )
+    losers = (
+        df[df["est_1w_pct"] < 0]
+        .sort_values("est_1w_pct", ascending=True)
+        .head(top_n)[display_cols]
+        .reset_index(drop=True)
+    )
+
+    return gainers, losers
+
+
 def _get_expiration_near_date(ticker, target_date):
     """Return the available expiration closest to target_date."""
     expirations = get_expirations(ticker)

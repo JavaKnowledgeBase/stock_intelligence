@@ -16,6 +16,7 @@ from config import MARKET_SCAN_TICKERS, TICKERS
 from gex_engine import calculate_gex
 from options_data import (
     build_market_movers_table,
+    build_price_forecast_table,
     build_strategy_table,
     build_market_volume_table,
     get_expirations,
@@ -217,17 +218,21 @@ for state_key, default_value in [
     ("options_flow_df", None),
     ("options_gex_series", None),
     ("options_chain_fetched_at", None),
+    ("forecast_gainers_df", None),
+    ("forecast_losers_df", None),
+    ("forecast_fetched_at", None),
 ]:
     if state_key not in st.session_state:
         st.session_state[state_key] = default_value
 
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "Market Options Screener",
     "Market Volume Leaders",
     "Rapid Movers",
     "Strategy Ideas",
     "Options Chain Explorer",
+    "Price Forecast",
 ])
 
 
@@ -620,4 +625,68 @@ with tab5:
             st.plotly_chart(fig, use_container_width=True)
     else:
         st.info("Select a ticker and expiration, then click Run.")
+
+
+# =========================
+# PRICE FORECAST
+# =========================
+
+with tab6:
+
+    col_run, col_info = st.columns([1, 4])
+    with col_run:
+        run_forecast = st.button("Run Price Forecast", use_container_width=True)
+    with col_info:
+        if st.session_state["forecast_fetched_at"]:
+            st.caption(f"Last run: {st.session_state['forecast_fetched_at']}")
+
+    if run_forecast:
+        with st.spinner("Scanning tickers and computing forecasts..."):
+            try:
+                gainers, losers = build_price_forecast_table(MARKET_SCAN_TICKERS, top_n=10)
+                st.session_state["forecast_gainers_df"] = gainers
+                st.session_state["forecast_losers_df"] = losers
+                st.session_state["forecast_fetched_at"] = _now()
+            except Exception as e:
+                st.error(f"Forecast failed: {e}")
+
+    gainers_df = st.session_state["forecast_gainers_df"]
+    losers_df = st.session_state["forecast_losers_df"]
+
+    _forecast_col_rename = {
+        "ticker": "Ticker",
+        "close": "Last Price",
+        "one_week_view": "1W Direction",
+        "est_1w_pct": "Est. 1W Move %",
+        "est_2w_pct": "Est. 2W Move %",
+        "rsi_14": "RSI (14)",
+        "adx_14": "ADX (14)",
+        "volatility_5d": "5D Range %",
+        "volume_ratio_5": "Vol Ratio",
+    }
+
+    if gainers_df is not None and not gainers_df.empty:
+        st.subheader("Top 10 Potential Gainers")
+        st.dataframe(
+            gainers_df.rename(columns=_forecast_col_rename),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    if losers_df is not None and not losers_df.empty:
+        st.subheader("Top 10 Potential Losers")
+        st.dataframe(
+            losers_df.rename(columns=_forecast_col_rename),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    if gainers_df is None and losers_df is None:
+        st.info("Click Run Price Forecast to scan tickers.")
+
+    st.caption(
+        "Estimates are derived from technical momentum signals (trend, RSI, MACD, ADX, MA alignment). "
+        "They are not a prediction model — treat as a directional watchlist, not a guarantee. "
+        "Est. 1W = next ~5 trading days. Est. 2W = next ~10 trading days."
+    )
 
