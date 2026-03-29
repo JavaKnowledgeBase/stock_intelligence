@@ -65,6 +65,31 @@ def _clone_frame(df):
     return df.copy() if isinstance(df, pd.DataFrame) else df
 
 
+def _safe_float(value, default=0.0, minimum=None, maximum=None):
+    numeric = pd.to_numeric(value, errors="coerce")
+    if pd.isna(numeric):
+        result = float(default)
+    else:
+        result = float(numeric)
+        if not np.isfinite(result):
+            result = float(default)
+    if minimum is not None:
+        result = max(result, minimum)
+    if maximum is not None:
+        result = min(result, maximum)
+    return result
+
+
+def _clean_numeric_columns(df, defaults):
+    cleaned = df.copy()
+    for column, default in defaults.items():
+        if column not in cleaned.columns:
+            continue
+        cleaned[column] = pd.to_numeric(cleaned[column], errors="coerce")
+        cleaned[column] = cleaned[column].replace([np.inf, -np.inf], np.nan).fillna(default)
+    return cleaned
+
+
 def _get_ticker(ticker):
     key = _cache_key("ticker", ticker)
     cached = _get_cached(key)
@@ -414,28 +439,30 @@ def _build_mover_row_inner(ticker):
         return None
 
     latest = features.iloc[-1]
-    close_price = float(pd.to_numeric(latest["Close"], errors="coerce"))
-    ret_5d = float(pd.to_numeric(latest["close_ret_5d"], errors="coerce"))
-    ret_3d = float(pd.to_numeric(latest["close_ret_3d"], errors="coerce"))
-    vol_5d = float(pd.to_numeric(latest["volatility_5d"], errors="coerce"))
-    vol_10d = float(pd.to_numeric(latest["volatility_10d"], errors="coerce"))
-    volume_ratio_5 = float(pd.to_numeric(latest["volume_ratio_5"], errors="coerce"))
-    volume_ratio_20 = float(pd.to_numeric(latest["volume_ratio_20"], errors="coerce"))
-    dist_ma_20 = float(pd.to_numeric(latest["dist_ma_20_pct"], errors="coerce"))
-    dist_ema_20 = float(pd.to_numeric(latest["dist_ema_20_pct"], errors="coerce"))
-    rsi_14 = float(pd.to_numeric(latest.get("rsi_14", 50), errors="coerce"))
-    macd_hist = float(pd.to_numeric(latest.get("macd_hist", 0), errors="coerce"))
-    adx_14 = float(pd.to_numeric(latest.get("adx_14", 0), errors="coerce"))
+    close_price = _safe_float(latest.get("Close"), default=np.nan)
+    ret_5d = _safe_float(latest.get("close_ret_5d"), default=np.nan)
+    ret_3d = _safe_float(latest.get("close_ret_3d"), default=np.nan)
+    vol_5d = _safe_float(latest.get("volatility_5d"), default=np.nan)
+    vol_10d = _safe_float(latest.get("volatility_10d"), default=np.nan)
+    volume_ratio_5 = _safe_float(latest.get("volume_ratio_5"), default=np.nan, minimum=0.0)
+    volume_ratio_20 = _safe_float(latest.get("volume_ratio_20"), default=np.nan, minimum=0.0)
+    dist_ma_20 = _safe_float(latest.get("dist_ma_20_pct"), default=0.0)
+    dist_ema_20 = _safe_float(latest.get("dist_ema_20_pct"), default=0.0)
+
+    required_metrics = [close_price, ret_5d, ret_3d, vol_5d, vol_10d, volume_ratio_5, volume_ratio_20]
+    if any(pd.isna(metric) or not np.isfinite(metric) for metric in required_metrics) or close_price <= 0:
+        return None
+
+    rsi_14 = _safe_float(latest.get("rsi_14", 50), default=50.0, minimum=0.0, maximum=100.0)
+    macd_hist = _safe_float(latest.get("macd_hist", 0), default=0.0)
+    adx_14 = _safe_float(latest.get("adx_14", 20), default=20.0, minimum=0.0, maximum=100.0)
     _ma_align_raw = pd.to_numeric(latest.get("ma_alignment", 0), errors="coerce")
     ma_alignment = int(_ma_align_raw) if pd.notna(_ma_align_raw) else 0
-    trend_consistency = float(pd.to_numeric(latest.get("trend_consistency_10d", 0.5), errors="coerce"))
-    vol_dir_ratio = float(pd.to_numeric(latest.get("vol_direction_ratio", 1.0), errors="coerce"))
-    _atr_raw = pd.to_numeric(latest.get("atr_14", np.nan), errors="coerce")
-    atr_14 = float(_atr_raw) if pd.notna(_atr_raw) and _atr_raw > 0 else close_price * 0.015
-    _obv_raw = pd.to_numeric(latest.get("obv_slope_10d", np.nan), errors="coerce")
-    obv_slope = float(_obv_raw) if pd.notna(_obv_raw) else 0.0
-    _52w_raw = pd.to_numeric(latest.get("pct_from_52w_high", np.nan), errors="coerce")
-    pct_from_52w_high = float(_52w_raw) if pd.notna(_52w_raw) else -50.0
+    trend_consistency = _safe_float(latest.get("trend_consistency_10d", 0.5), default=0.5, minimum=0.0, maximum=1.0)
+    vol_dir_ratio = _safe_float(latest.get("vol_direction_ratio", 1.0), default=1.0, minimum=0.0)
+    atr_14 = _safe_float(latest.get("atr_14", np.nan), default=close_price * 0.015, minimum=close_price * 0.002)
+    obv_slope = _safe_float(latest.get("obv_slope_10d", np.nan), default=0.0)
+    pct_from_52w_high = _safe_float(latest.get("pct_from_52w_high", np.nan), default=-50.0)
 
     # Relative strength vs SPY (ticker 5d return minus SPY 5d return)
     spy_ret_5d = _get_spy_ret_5d()
@@ -584,7 +611,36 @@ def build_price_forecast_table(tickers, top_n=10):
         return pd.DataFrame(), pd.DataFrame()
 
     df = movers_df.copy()
-    df = df.dropna(subset=["one_week_score", "one_month_score", "volatility_5d"]).reset_index(drop=True)
+    df = _clean_numeric_columns(
+        df,
+        {
+            "close": 0.0,
+            "one_week_score": 0.0,
+            "one_month_score": 0.0,
+            "volatility_5d": 0.0,
+            "volume_ratio_5": 1.0,
+            "rsi_14": 50.0,
+            "adx_14": 20.0,
+        },
+    )
+    df = df[
+        (df["close"] > 0)
+        & (df["one_week_score"] > 0)
+        & (df["one_month_score"] > 0)
+        & (df["volatility_5d"] > 0)
+        & (df["one_week_view"].isin(["Grow Rapidly", "Fall Steeply"]))
+        & (df["one_month_view"].isin(["Grow Rapidly", "Fall Steeply"]))
+    ].reset_index(drop=True)
+
+    if df.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    df["forecast_confidence"] = (
+        np.clip(df["adx_14"] / 35.0, 0.65, 1.15)
+        * np.clip(df["volume_ratio_5"] / 1.5, 0.75, 1.15)
+        * np.clip(1 - (df["rsi_14"].sub(50).abs() / 100.0), 0.70, 1.00)
+    )
+    df = df[df["forecast_confidence"] >= 0.72].reset_index(drop=True)
 
     if df.empty:
         return pd.DataFrame(), pd.DataFrame()
@@ -595,8 +651,14 @@ def build_price_forecast_table(tickers, top_n=10):
     # Convert scores to % estimates, capped by each ticker's own volatility range
     vol_cap = (df["volatility_5d"].astype(float) * 5).clip(lower=2.0).values
 
-    df["est_1w_pct"] = np.minimum(df["one_week_score"].astype(float) * 0.35, vol_cap)
-    df["est_2w_pct"] = np.minimum(df["two_week_score"].astype(float) * 0.45, vol_cap * 1.4)
+    df["est_1w_pct"] = np.minimum(
+        df["one_week_score"].astype(float) * 0.30 * df["forecast_confidence"],
+        vol_cap,
+    )
+    df["est_2w_pct"] = np.minimum(
+        df["two_week_score"].astype(float) * 0.40 * df["forecast_confidence"],
+        vol_cap * 1.25,
+    )
 
     # Apply direction sign
     up_mask_1w = df["one_week_view"] == "Grow Rapidly"
@@ -608,9 +670,11 @@ def build_price_forecast_table(tickers, top_n=10):
     df["est_1w_pct"] = df["est_1w_pct"].round(2)
     df["est_2w_pct"] = df["est_2w_pct"].round(2)
 
+    df["forecast_confidence"] = (df["forecast_confidence"] * 100).round(1)
+
     display_cols = [
         "ticker", "close", "one_week_view", "est_1w_pct",
-        "est_2w_pct", "rsi_14", "adx_14", "volatility_5d", "volume_ratio_5",
+        "est_2w_pct", "forecast_confidence", "rsi_14", "adx_14", "volatility_5d", "volume_ratio_5",
     ]
 
     gainers = (
@@ -803,7 +867,7 @@ def _pick_strategy_contract(ticker, contract_type, close_price, hv_30d=0.0, expi
 
 
 def _build_strategy_recommendation(row):
-    hv_30d = float(row.get("hv_30d", 0) or 0)
+    hv_30d = _safe_float(row.get("hv_30d", 0), default=0.0, minimum=0.0)
     expiry_override = row.get("_target_expiry") or None
     horizon = row.get("_horizon", "")
     contract = _pick_strategy_contract(
@@ -818,17 +882,17 @@ def _build_strategy_recommendation(row):
         return None
 
     ticker = row["ticker"]
-    underlying_move_pct = abs(float(row["ret_5d"]))
+    underlying_move_pct = abs(_safe_float(row.get("ret_5d", 0), default=0.0))
     contract_side = contract["contract_type"]
-    rsi = float(row.get("rsi_14", 50) or 50)
-    adx = float(row.get("adx_14", 0) or 0)
+    rsi = _safe_float(row.get("rsi_14", 50), default=50.0, minimum=0.0, maximum=100.0)
+    adx = _safe_float(row.get("adx_14", 20), default=20.0, minimum=0.0, maximum=100.0)
 
     mid_price = (contract["bid"] + contract["ask"]) / 2 if contract["ask"] > 0 else contract["option_value"]
     mid_price = round(mid_price, 2)
 
     # ATR-based stop/target sizing: use ticker ATR scaled to option price
-    atr_14 = float(row.get("atr_14", 0) or 0)
-    close_price = float(row.get("close", 1) or 1)
+    atr_14 = _safe_float(row.get("atr_14", 0), default=0.0, minimum=0.0)
+    close_price = _safe_float(row.get("close", 1), default=1.0, minimum=0.01)
     atr_pct = (atr_14 / close_price) if close_price > 0 else 0.02
     # Stop = 1.5× ATR from entry; targets = 2× and 3× ATR, bounded to 15%–35%
     stop_mult = max(0.15, min(0.30, atr_pct * 1.5))
@@ -885,6 +949,7 @@ def _build_strategy_recommendation(row):
         "rsi_14": round(rsi, 1),
         "adx_14": round(adx, 1),
         "strategy_score": round(float(row["strategy_score"]), 2),
+        "strategy_confidence": round(_safe_float(row.get("strategy_confidence", 0.0), default=0.0) * 100, 1),
         "day_volume_share": round(float(row["percent_of_day_total"]), 2),
         "underlying_5d_move": round(underlying_move_pct, 2),
         "entry_rule": entry_rule,
@@ -954,7 +1019,36 @@ def build_strategy_table(tickers, top_n=10):
         on="ticker",
         how="left",
     )
+    combined = _clean_numeric_columns(
+        combined,
+        {
+            "close": 0.0,
+            "one_week_score": 0.0,
+            "one_month_score": 0.0,
+            "ret_5d": 0.0,
+            "volatility_5d": 0.0,
+            "rsi_14": 50.0,
+            "adx_14": 20.0,
+            "atr_14": 0.0,
+            "hv_30d": 0.0,
+            "one_day_volume": 0.0,
+            "percent_of_day_total": 0.0,
+            "call_volume": 0.0,
+            "put_volume": 0.0,
+        },
+    )
+    combined = combined[
+        (combined["close"] > 0)
+        & (combined["one_week_score"] > 0)
+        & (combined["one_month_score"] > 0)
+        & (combined["volatility_5d"] > 0)
+    ].copy()
     diagnostics["combined_candidates"] = len(combined)
+
+    if combined.empty:
+        diagnostics["status"] = "data_unavailable"
+        diagnostics["message"] = "Market data was returned, but all rows failed numeric quality checks."
+        return pd.DataFrame(), diagnostics
 
     use_month_view = combined["one_month_score"] >= combined["one_week_score"]
     combined["signal_direction"] = combined["one_week_view"]
@@ -965,11 +1059,23 @@ def build_strategy_table(tickers, top_n=10):
             "Fall Steeply": "put",
         }
     )
+    combined["strategy_confidence"] = (
+        np.clip(combined["adx_14"] / 35.0, 0.65, 1.15)
+        * np.clip(combined["volume_ratio_5"] / 1.5, 0.75, 1.15)
+        * np.clip(1 - (combined["rsi_14"].sub(50).abs() / 100.0), 0.70, 1.00)
+    )
+    combined = combined[combined["strategy_confidence"] >= 0.72].copy()
+
+    if combined.empty:
+        diagnostics["status"] = "data_unavailable"
+        diagnostics["message"] = "Signals were available, but all candidates failed the confidence threshold."
+        return pd.DataFrame(), diagnostics
+
     combined["strategy_score"] = (
         combined["one_week_score"] * 0.35
         + combined["one_month_score"] * 0.45
-        + combined["percent_of_day_total"].fillna(0) * 0.20
-    )
+        + combined["percent_of_day_total"] * 0.20
+    ) * combined["strategy_confidence"]
     combined["signal_strength"] = combined[["one_week_score", "one_month_score"]].max(axis=1)
 
     # Regime filter: suppress weak trades that fight the broad market

@@ -64,8 +64,8 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     for col in ["Open", "High", "Low", "Close", "Volume"]:
         daily[col] = daily[col].astype(float)
 
-    price_range = (daily["High"] - daily["Low"]).replace(0, pd.NA)
-    prev_close = daily["Close"].shift(1).replace(0, pd.NA)
+    price_range = (daily["High"] - daily["Low"]).replace(0, np.nan)
+    prev_close = daily["Close"].shift(1).replace(0, np.nan)
 
     daily["date"] = daily.index.strftime("%Y-%m-%d")
     daily["day_of_week"] = daily.index.dayofweek
@@ -114,7 +114,7 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     _loss = (-_delta).clip(lower=0)
     _avg_gain = _gain.ewm(com=13, adjust=False).mean()
     _avg_loss = _loss.ewm(com=13, adjust=False).mean()
-    _rs = _avg_gain / _avg_loss.replace(0, pd.NA)
+    _rs = _avg_gain / _avg_loss.replace(0, np.nan)
     daily["rsi_14"] = (100 - (100 / (1 + _rs))).clip(0, 100)
 
     # MACD (12, 26, 9)
@@ -129,7 +129,7 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     _bb_std = daily["Close"].rolling(20).std()
     _bb_upper = _bb_mid + 2 * _bb_std
     _bb_lower = _bb_mid - 2 * _bb_std
-    _bb_range = (_bb_upper - _bb_lower).replace(0, pd.NA)
+    _bb_range = (_bb_upper - _bb_lower).replace(0, np.nan)
     daily["bb_pct"] = (daily["Close"] - _bb_lower) / _bb_range
 
     # ADX (14) — trend strength, direction-neutral
@@ -151,9 +151,9 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     )
     _atr14 = _tr.ewm(alpha=1 / 14, adjust=False).mean()
     daily["atr_14"] = _atr14
-    _plus_di14 = 100 * _plus_dm.ewm(alpha=1 / 14, adjust=False).mean() / _atr14.replace(0, pd.NA)
-    _minus_di14 = 100 * _minus_dm.ewm(alpha=1 / 14, adjust=False).mean() / _atr14.replace(0, pd.NA)
-    _di_sum = (_plus_di14 + _minus_di14).replace(0, pd.NA)
+    _plus_di14 = 100 * _plus_dm.ewm(alpha=1 / 14, adjust=False).mean() / _atr14.replace(0, np.nan)
+    _minus_di14 = 100 * _minus_dm.ewm(alpha=1 / 14, adjust=False).mean() / _atr14.replace(0, np.nan)
+    _di_sum = (_plus_di14 + _minus_di14).replace(0, np.nan)
     _dx = 100 * (_plus_di14 - _minus_di14).abs() / _di_sum
     daily["adx_14"] = _dx.ewm(alpha=1 / 14, adjust=False).mean()
     daily["plus_di_14"] = _plus_di14
@@ -202,6 +202,27 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
 
     # Fill supplementary columns with neutral values so NaN never reaches scoring
     neutral_fills = {
+        "close_ret_3d":         0.0,
+        "close_ret_5d":         0.0,
+        "volatility_5d":        daily["hl_pct"],
+        "volatility_10d":       daily["hl_pct"],
+        "volatility_std_5d":    0.0,
+        "volatility_std_10d":   0.0,
+        "dist_ma_5_pct":        0.0,
+        "dist_ma_10_pct":       0.0,
+        "dist_ma_20_pct":       0.0,
+        "dist_ema_10_pct":      0.0,
+        "dist_ema_20_pct":      0.0,
+        "volume_ratio_5":       1.0,
+        "volume_ratio_20":      1.0,
+        "rsi_14":               50.0,
+        "macd":                 0.0,
+        "macd_signal":          0.0,
+        "macd_hist":            0.0,
+        "adx_14":               20.0,
+        "plus_di_14":           0.0,
+        "minus_di_14":          0.0,
+        "ma_alignment":         0.0,
         "obv_slope_10d":        0.0,
         "vol_direction_ratio":  1.0,
         "trend_consistency_10d": 0.5,
@@ -221,8 +242,7 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
 
     # Drop rows only missing core features
     core_cols = [
-        "Close", "hl_pct", "close_ret_1d", "close_ret_5d",
-        "volatility_5d", "volume_ratio_5", "rsi_14", "macd_hist", "adx_14",
+        "Close", "hl_pct", "close_ret_1d", "volatility_5d",
     ]
     daily = daily.dropna(subset=[c for c in core_cols if c in daily.columns]).copy()
 
