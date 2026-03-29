@@ -95,6 +95,30 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     daily["volume_ratio_5"] = daily["Volume"] / daily["Volume"].rolling(window=5).mean()
     daily["volume_ratio_20"] = daily["Volume"] / daily["Volume"].rolling(window=20).mean()
 
+    # RSI (14)
+    _delta = daily["Close"].diff()
+    _gain = _delta.clip(lower=0)
+    _loss = (-_delta).clip(lower=0)
+    _avg_gain = _gain.ewm(com=13, adjust=False).mean()
+    _avg_loss = _loss.ewm(com=13, adjust=False).mean()
+    _rs = _avg_gain / _avg_loss.replace(0, pd.NA)
+    daily["rsi_14"] = (100 - (100 / (1 + _rs))).clip(0, 100)
+
+    # MACD (12, 26, 9)
+    _ema12 = daily["Close"].ewm(span=12, adjust=False).mean()
+    _ema26 = daily["Close"].ewm(span=26, adjust=False).mean()
+    daily["macd"] = _ema12 - _ema26
+    daily["macd_signal"] = daily["macd"].ewm(span=9, adjust=False).mean()
+    daily["macd_hist"] = daily["macd"] - daily["macd_signal"]
+
+    # Bollinger Band position (20, 2)
+    _bb_mid = daily["Close"].rolling(20).mean()
+    _bb_std = daily["Close"].rolling(20).std()
+    _bb_upper = _bb_mid + 2 * _bb_std
+    _bb_lower = _bb_mid - 2 * _bb_std
+    _bb_range = (_bb_upper - _bb_lower).replace(0, pd.NA)
+    daily["bb_pct"] = (daily["Close"] - _bb_lower) / _bb_range
+
     for lag in [1, 2, 3, 5]:
         daily[f"hl_pct_lag_{lag}"] = daily["hl_pct"].shift(lag)
         daily[f"oc_pct_lag_{lag}"] = daily["oc_pct"].shift(lag)

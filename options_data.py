@@ -10,6 +10,7 @@ from pathlib import Path
 import threading
 import time
 
+import numpy as np
 import pandas as pd
 import yfinance as yf
 
@@ -388,23 +389,45 @@ def _build_mover_row(ticker):
     volume_ratio_20 = float(pd.to_numeric(latest["volume_ratio_20"], errors="coerce"))
     dist_ma_20 = float(pd.to_numeric(latest["dist_ma_20_pct"], errors="coerce"))
     dist_ema_20 = float(pd.to_numeric(latest["dist_ema_20_pct"], errors="coerce"))
+    rsi_14 = float(pd.to_numeric(latest.get("rsi_14", 50), errors="coerce"))
+    macd_hist = float(pd.to_numeric(latest.get("macd_hist", 0), errors="coerce"))
 
-    swing_factor = ((vol_5d * 0.6) + (vol_10d * 0.4))
-    volume_factor = ((volume_ratio_5 * 0.6) + (volume_ratio_20 * 0.4))
-    trend_factor = ((ret_5d * 0.65) + (ret_3d * 0.35))
-    extension_factor = ((dist_ma_20 * 0.6) + (dist_ema_20 * 0.4))
+    # 30-day annualized historical volatility
+    try:
+        _flat = history.copy()
+        if isinstance(_flat.columns, pd.MultiIndex):
+            _flat.columns = [c[0] for c in _flat.columns]
+        _close = pd.to_numeric(_flat["Close"], errors="coerce").dropna()
+        _log_ret = np.log(_close / _close.shift(1)).dropna()
+        hv_30d = float(_log_ret.tail(30).std() * np.sqrt(252) * 100)
+    except Exception:
+        hv_30d = 0.0
+
+    swing_factor = (vol_5d * 0.6) + (vol_10d * 0.4)
+    volume_factor = (volume_ratio_5 * 0.6) + (volume_ratio_20 * 0.4)
+    trend_factor = (ret_5d * 0.65) + (ret_3d * 0.35)
+    extension_factor = (dist_ma_20 * 0.6) + (dist_ema_20 * 0.4)
+
+    # RSI additive adjustment (calls: RSI 50-70 ideal; puts: RSI 30-50 ideal)
+    rsi_adj_up = 2.0 if 50 <= rsi_14 <= 70 else (-3.0 if rsi_14 > 75 else 0.0)
+    rsi_adj_dn = 2.0 if 30 <= rsi_14 <= 50 else (-3.0 if rsi_14 < 25 else 0.0)
+
+    # MACD histogram additive adjustment
+    macd_adj = 1.5 if macd_hist > 0 else -1.5
 
     one_week_upside = (
         trend_factor * 0.9
         + swing_factor * 0.8
         + max(volume_factor - 1, 0) * 6
         + max(extension_factor, 0) * 0.35
+        + rsi_adj_up + macd_adj
     )
     one_week_downside = (
         (-trend_factor) * 0.9
         + swing_factor * 0.8
         + max(volume_factor - 1, 0) * 6
         + max(-extension_factor, 0) * 0.35
+        + rsi_adj_dn + (-macd_adj)
     )
 
     one_month_upside = (
@@ -412,12 +435,14 @@ def _build_mover_row(ticker):
         + swing_factor * 0.9
         + max(volume_factor - 1, 0) * 8
         + max(extension_factor, 0) * 0.45
+        + rsi_adj_up + macd_adj
     )
     one_month_downside = (
         (-trend_factor) * 1.1
         + swing_factor * 0.9
         + max(volume_factor - 1, 0) * 8
         + max(-extension_factor, 0) * 0.45
+        + rsi_adj_dn + (-macd_adj)
     )
 
     direction_1w = "Grow Rapidly" if one_week_upside >= one_week_downside else "Fall Steeply"
@@ -436,6 +461,8 @@ def _build_mover_row(ticker):
         "ret_5d": round(ret_5d, 2),
         "volatility_5d": round(vol_5d, 2),
         "volume_ratio_5": round(volume_ratio_5, 2),
+        "rsi_14": round(rsi_14, 1),
+        "hv_30d": round(hv_30d, 2),
     }
 
 
@@ -498,7 +525,7 @@ def _get_strategy_expiration(ticker, min_days=21, max_days=45):
     return dated_expirations[0][0] if dated_expirations else None
 
 
-def _pick_strategy_contract(ticker, contract_type, close_price):
+def _pick_strategy_contract(ticker, contract_type, close_price, hv_30d=0.0):
     expiry = _get_strategy_expiration(ticker)
 
     if expiry is None:
@@ -525,48 +552,68 @@ def _pick_strategy_contract(ticker, contract_type, close_price):
     for column in ["strike", "last_price", "bid", "ask", "volume", "open_interest"]:
         filtered[column] = pd.to_numeric(filtered[column], errors="coerce").fillna(0)
 
-    filtered = filtered[
+    filtered["mid_price"] = (filtered["bid"] + filtered["ask"]) / 2
+    filtered["spread_pct"] = (
+        (filtered["ask"] - filtered["bid"]) / filtered["mid_price"].replace(0, pd.NA) * 100
+    )
+
+    base_filter = (
         (filtered["ask"] > 0)
         & (filtered["bid"] >= 0)
-        & (filtered["volume"] >= 50)
-        & (filtered["open_interest"] >= 100)
-    ].copy()
-
-    if filtered.empty:
-        return None
-
-    filtered["mid_price"] = (filtered["bid"] + filtered["ask"]) / 2
-    filtered = filtered[filtered["mid_price"] > 0].copy()
-
-    if filtered.empty:
-        return None
-
-    filtered["spread_pct"] = (
-        (filtered["ask"] - filtered["bid"]) / filtered["mid_price"] * 100
+        & (filtered["mid_price"] > 0)
     )
-    filtered = filtered[filtered["spread_pct"] <= 18].copy()
+    filtered = filtered[base_filter].copy()
 
     if filtered.empty:
+        return None
+
+    # Two-pass liquidity filter: tight first, fallback to loose
+    tight = filtered[
+        (filtered["volume"] >= 100)
+        & (filtered["open_interest"] >= 100)
+        & (filtered["spread_pct"] <= 12)
+    ]
+    working = tight if not tight.empty else filtered[
+        (filtered["volume"] >= 50)
+        & (filtered["open_interest"] >= 100)
+        & (filtered["spread_pct"] <= 18)
+    ]
+
+    if working.empty:
         return None
 
     target_multiplier = 1.02 if contract_type == "call" else 0.98
     target_strike = close_price * target_multiplier
 
-    filtered["strike_distance"] = (filtered["strike"] - target_strike).abs()
-    filtered["distance_pct"] = filtered["strike_distance"] / max(close_price, 1) * 100
-    filtered["liquidity_score"] = filtered["volume"] + (filtered["open_interest"] * 0.5)
-    filtered["contract_quality_score"] = (
-        (filtered["liquidity_score"] / filtered["liquidity_score"].max()) * 55
-        + ((18 - filtered["spread_pct"]).clip(lower=0) / 18) * 30
-        + ((10 - filtered["distance_pct"]).clip(lower=0) / 10) * 15
+    working = working.copy()
+    working["strike_distance"] = (working["strike"] - target_strike).abs()
+    working["distance_pct"] = working["strike_distance"] / max(close_price, 1) * 100
+    working["liquidity_score"] = working["volume"] + (working["open_interest"] * 0.5)
+    max_liq = working["liquidity_score"].max()
+    working["contract_quality_score"] = (
+        (working["liquidity_score"] / max_liq) * 55
+        + ((18 - working["spread_pct"]).clip(lower=0) / 18) * 30
+        + ((10 - working["distance_pct"]).clip(lower=0) / 10) * 15
     )
 
-    filtered = filtered.sort_values(
+    working = working.sort_values(
         ["contract_quality_score", "liquidity_score", "last_price"],
         ascending=[False, False, False],
     )
 
-    selected = filtered.iloc[0]
+    selected = working.iloc[0]
+
+    # IV / HV ratio
+    iv_hv_ratio = None
+    try:
+        iv_raw = selected.get("impliedVolatility", None) if hasattr(selected, "get") else selected["impliedVolatility"] if "impliedVolatility" in selected.index else None
+        if iv_raw is not None and pd.notna(iv_raw) and hv_30d > 0:
+            iv_annualized = float(iv_raw) * 100
+            iv_hv_ratio = round(iv_annualized / hv_30d, 2)
+    except Exception:
+        iv_hv_ratio = None
+
+    used_tight = not tight.empty
 
     return {
         "expiration": expiry,
@@ -579,36 +626,62 @@ def _pick_strategy_contract(ticker, contract_type, close_price):
         "open_interest": int(selected["open_interest"]),
         "volume": int(selected["volume"]),
         "contract_quality_score": round(float(selected["contract_quality_score"]), 2),
+        "iv_hv_ratio": iv_hv_ratio,
+        "tight_liquidity": used_tight,
     }
 
 
 def _build_strategy_recommendation(row):
+    hv_30d = float(row.get("hv_30d", 0) or 0)
     contract = _pick_strategy_contract(
         row["ticker"],
         row["contract_type"],
         row["close"],
+        hv_30d=hv_30d,
     )
 
     if not contract:
         return None
 
+    ticker = row["ticker"]
     underlying_move_pct = abs(float(row["ret_5d"]))
     contract_side = contract["contract_type"]
+    rsi = float(row.get("rsi_14", 50) or 50)
+
+    mid_price = (contract["bid"] + contract["ask"]) / 2 if contract["ask"] > 0 else contract["option_value"]
+    mid_price = round(mid_price, 2)
+    stop_price = round(mid_price * 0.80, 2)
+    target_1 = round(mid_price * 1.20, 2)
+    target_2 = round(mid_price * 1.40, 2)
+
     entry_rule = (
-        "Enter only if price confirms the opening move and option spread stays tight."
+        f"Enter near open if {ticker} confirms direction. "
+        f"Target entry around ${mid_price:.2f} mid-price."
     )
+    if rsi > 68:
+        entry_rule += f" RSI elevated ({rsi:.0f}) — wait for a small pullback before entering."
+    elif rsi < 32:
+        entry_rule += f" RSI oversold ({rsi:.0f}) — wait for stabilization before entering."
+
     stop_rule = (
-        "Exit if premium drops 20% from entry or if the underlying reverses the morning trend."
+        f"Stop loss at ${stop_price:.2f} (−20% from entry). "
+        f"Exit immediately if {ticker} reverses the morning trend."
     )
     take_profit_rule = (
-        "Take profit into 15%-25% premium gains and trail the rest only if momentum remains strong."
+        f"Take 50% off at ${target_1:.2f} (+20%). "
+        f"Trail remainder to ${target_2:.2f} (+40%) if momentum holds."
     )
     midday_rule = (
-        "Recheck near 11 AM; avoid new entries if volume fades and price stalls."
+        f"At 11 AM check {ticker} volume vs open. "
+        f"If volume is fading and price is stalling near ${mid_price:.2f}, exit remaining position."
+    )
+    daily_plan = (
+        f"Bias {contract_side} on morning confirmation. "
+        f"Risk ${stop_price:.2f}, first target ${target_1:.2f}, extended target ${target_2:.2f}."
     )
 
     return {
-        "ticker": row["ticker"],
+        "ticker": ticker,
         "view": row["signal_direction"],
         "contract_type": contract["contract_type"],
         "expiration": contract["expiration"],
@@ -620,6 +693,8 @@ def _build_strategy_recommendation(row):
         "open_interest": contract["open_interest"],
         "option_volume": contract["volume"],
         "contract_quality_score": contract["contract_quality_score"],
+        "iv_hv_ratio": contract.get("iv_hv_ratio"),
+        "rsi_14": round(rsi, 1),
         "strategy_score": round(float(row["strategy_score"]), 2),
         "day_volume_share": round(float(row["percent_of_day_total"]), 2),
         "underlying_5d_move": round(underlying_move_pct, 2),
@@ -627,15 +702,36 @@ def _build_strategy_recommendation(row):
         "stop_rule": stop_rule,
         "take_profit_rule": take_profit_rule,
         "midday_check": midday_rule,
-        "daily_plan": (
-            f"Bias {contract_side} on morning confirmation, then reassess at 11 AM."
-        ),
+        "daily_plan": daily_plan,
     }
+
+
+def _get_market_regime():
+    try:
+        spy = get_price_history("SPY", period="3mo", interval="1d")
+        if spy is None or spy.empty:
+            return "neutral"
+        if isinstance(spy.columns, pd.MultiIndex):
+            spy.columns = [c[0] for c in spy.columns]
+        close = pd.to_numeric(spy["Close"], errors="coerce").dropna()
+        if len(close) < 20:
+            return "neutral"
+        ret_5d = (close.iloc[-1] - close.iloc[-6]) / close.iloc[-6] * 100
+        ma_20 = close.tail(20).mean()
+        above_ma20 = close.iloc[-1] > ma_20
+        if ret_5d > 1.0 and above_ma20:
+            return "bullish"
+        elif ret_5d < -1.0 and not above_ma20:
+            return "bearish"
+        return "neutral"
+    except Exception:
+        return "neutral"
 
 
 def build_strategy_table(tickers, top_n=10):
     movers_df = build_market_movers_table(tickers)
     volume_df = build_market_volume_table(tickers)
+    regime = _get_market_regime()
 
     diagnostics = {
         "tickers_requested": len(tickers),
@@ -644,6 +740,7 @@ def build_strategy_table(tickers, top_n=10):
         "combined_candidates": 0,
         "contracts_evaluated": 0,
         "contracts_selected": 0,
+        "regime": regime,
         "status": "ok",
         "message": "",
     }
@@ -686,6 +783,15 @@ def build_strategy_table(tickers, top_n=10):
         + combined["percent_of_day_total"].fillna(0) * 0.20
     )
     combined["signal_strength"] = combined[["one_week_score", "one_month_score"]].max(axis=1)
+
+    # Regime filter: suppress weak trades that fight the broad market
+    if regime in ("bullish", "bearish") and len(combined) > 0:
+        score_threshold = combined["strategy_score"].quantile(0.60)
+        aligned_side = "call" if regime == "bullish" else "put"
+        combined = combined[
+            (combined["contract_type"] == aligned_side)
+            | (combined["strategy_score"] >= score_threshold)
+        ]
 
     combined = combined.sort_values(
         ["strategy_score", "signal_strength", "one_day_volume"],

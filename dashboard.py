@@ -154,13 +154,17 @@ def format_strategy_table(df):
     if df is None or df.empty:
         return df
 
-    formatted_df = df[[
+    base_cols = [
         "ticker", "view", "contract_type", "expiration", "strike_price",
         "option_value", "bid", "ask", "spread_pct", "open_interest", "option_volume",
         "contract_quality_score", "strategy_score", "day_volume_share",
-        "underlying_5d_move", "entry_rule", "stop_rule", "take_profit_rule",
-        "midday_check", "daily_plan",
-    ]].copy()
+        "underlying_5d_move",
+    ]
+    optional_cols = ["rsi_14", "iv_hv_ratio"]
+    text_cols = ["entry_rule", "stop_rule", "take_profit_rule", "midday_check", "daily_plan"]
+
+    available = base_cols + [c for c in optional_cols if c in df.columns] + text_cols
+    formatted_df = df[[c for c in available if c in df.columns]].copy()
 
     return formatted_df.rename(columns={
         "ticker": "Ticker",
@@ -178,6 +182,8 @@ def format_strategy_table(df):
         "strategy_score": "Strategy Score",
         "day_volume_share": "% of Day Volume",
         "underlying_5d_move": "Underlying 5D Move %",
+        "rsi_14": "RSI (14)",
+        "iv_hv_ratio": "IV/HV Ratio",
         "entry_rule": "Entry Rule",
         "stop_rule": "Stop Rule",
         "take_profit_rule": "Take Profit Rule",
@@ -444,8 +450,10 @@ with tab4:
             "Fresh data" if strategy_diagnostics["status"] != "data_unavailable"
             else "Stale data blocked"
         )
+        regime = strategy_diagnostics.get("regime", "neutral")
         st.caption(
             f"{freshness_label} | Status: {strategy_diagnostics['status']} | "
+            f"Market Regime: {regime.capitalize()} | "
             f"Tickers: {strategy_diagnostics['tickers_requested']} | "
             f"Movers: {strategy_diagnostics['movers_found']} | "
             f"Volume rows: {strategy_diagnostics['volume_rows_found']} | "
