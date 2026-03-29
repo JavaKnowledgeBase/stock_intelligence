@@ -155,7 +155,7 @@ def format_strategy_table(df):
         return df
 
     base_cols = [
-        "ticker", "view", "contract_type", "expiration", "strike_price",
+        "ticker", "horizon", "view", "contract_type", "expiration", "strike_price",
         "option_value", "bid", "ask", "spread_pct", "open_interest", "option_volume",
         "contract_quality_score", "strategy_score", "day_volume_share",
         "underlying_5d_move",
@@ -168,6 +168,7 @@ def format_strategy_table(df):
 
     return formatted_df.rename(columns={
         "ticker": "Ticker",
+        "horizon": "Horizon",
         "view": "Market View",
         "contract_type": "Call or Put",
         "expiration": "Expiration",

@@ -509,6 +509,36 @@ def build_market_movers_table(tickers):
     return movers_df
 
 
+def _get_expiration_near_date(ticker, target_date):
+    """Return the available expiration closest to target_date."""
+    expirations = get_expirations(ticker)
+    if not expirations:
+        return None
+    target = pd.Timestamp(target_date).normalize()
+    best, best_diff = None, None
+    for expiry in expirations:
+        expiry_dt = pd.to_datetime(expiry, errors="coerce")
+        if pd.isna(expiry_dt):
+            continue
+        diff = abs((expiry_dt.normalize() - target).days)
+        if best_diff is None or diff < best_diff:
+            best_diff = diff
+            best = expiry
+    return best
+
+
+def _upcoming_fridays(n=2):
+    """Return the next n Fridays from today as Timestamps."""
+    today = pd.Timestamp.now().normalize()
+    fridays = []
+    d = today
+    while len(fridays) < n:
+        d += pd.Timedelta(days=1)
+        if d.dayofweek == 4:  # Friday
+            fridays.append(d)
+    return fridays
+
+
 def _get_strategy_expiration(ticker, min_days=21, max_days=45):
     expirations = get_expirations(ticker)
 
@@ -545,8 +575,9 @@ def _get_strategy_expiration(ticker, min_days=21, max_days=45):
     return dated_expirations[0][0] if dated_expirations else None
 
 
-def _pick_strategy_contract(ticker, contract_type, close_price, hv_30d=0.0):
-    expiry = _get_strategy_expiration(ticker)
+def _pick_strategy_contract(ticker, contract_type, close_price, hv_30d=0.0, expiry=None):
+    if expiry is None:
+        expiry = _get_strategy_expiration(ticker)
 
     if expiry is None:
         return None
@@ -653,11 +684,14 @@ def _pick_strategy_contract(ticker, contract_type, close_price, hv_30d=0.0):
 
 def _build_strategy_recommendation(row):
     hv_30d = float(row.get("hv_30d", 0) or 0)
+    expiry_override = row.get("_target_expiry") or None
+    horizon = row.get("_horizon", "")
     contract = _pick_strategy_contract(
         row["ticker"],
         row["contract_type"],
         row["close"],
         hv_30d=hv_30d,
+        expiry=expiry_override,
     )
 
     if not contract:
@@ -703,6 +737,7 @@ def _build_strategy_recommendation(row):
 
     return {
         "ticker": ticker,
+        "horizon": horizon,
         "view": row["signal_direction"],
         "contract_type": contract["contract_type"],
         "expiration": contract["expiration"],
@@ -820,11 +855,54 @@ def build_strategy_table(tickers, top_n=10):
         ascending=[False, False, False],
     )
 
-    candidate_limit = min(len(combined), max(top_n * 3, top_n + 4, 12))
-    candidates = combined.head(candidate_limit).copy()
+    # Select top_n unique tickers, then expand each into horizon rows
+    today = pd.Timestamp.now().normalize()
+    spy_horizons = [
+        (today + pd.Timedelta(days=5), "+5d"),
+        (today + pd.Timedelta(days=10), "+10d"),
+        (today + pd.Timedelta(days=15), "+15d"),
+        (today + pd.Timedelta(days=21), "+3wk"),
+    ]
+    fridays = _upcoming_fridays(2)
+    friday_labels = ["Next Fri", "Fri+2"]
+
+    seen_tickers = set()
+    expanded_rows = []
+    seen_expiry_keys = set()
+
+    for _, row in combined.iterrows():
+        ticker = row["ticker"]
+        if ticker not in seen_tickers:
+            seen_tickers.add(ticker)
+        if len(seen_tickers) > top_n:
+            break
+
+        if ticker == "SPY":
+            horizons = spy_horizons
+            labels = [label for _, label in spy_horizons]
+            targets = [target for target, _ in spy_horizons]
+        else:
+            horizons = list(zip(fridays, friday_labels))
+            targets = fridays
+            labels = friday_labels
+
+        for target, label in zip(targets, labels):
+            expiry = _get_expiration_near_date(ticker, target)
+            if not expiry:
+                continue
+            key = (ticker, expiry)
+            if key in seen_expiry_keys:
+                continue
+            seen_expiry_keys.add(key)
+            new_row = row.copy()
+            new_row["_target_expiry"] = expiry
+            new_row["_horizon"] = label
+            expanded_rows.append(new_row)
+
+    candidates = pd.DataFrame(expanded_rows) if expanded_rows else pd.DataFrame()
 
     recommendations = []
-    max_workers = min(6, len(candidates) or 1)
+    max_workers = min(8, len(candidates) or 1)
 
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = [
@@ -840,11 +918,15 @@ def build_strategy_table(tickers, top_n=10):
                 recommendations.append(recommendation)
 
     if recommendations:
+        # Sort: SPY first (market context), then by strategy score
         recommendations = sorted(
             recommendations,
-            key=lambda item: (item["strategy_score"], item["contract_quality_score"]),
-            reverse=True,
-        )[:top_n]
+            key=lambda item: (
+                0 if item["ticker"] == "SPY" else 1,
+                -item["strategy_score"],
+                -item["contract_quality_score"],
+            ),
+        )
 
     diagnostics["contracts_selected"] = len(recommendations)
 
