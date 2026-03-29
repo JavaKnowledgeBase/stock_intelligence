@@ -119,6 +119,46 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     _bb_range = (_bb_upper - _bb_lower).replace(0, pd.NA)
     daily["bb_pct"] = (daily["Close"] - _bb_lower) / _bb_range
 
+    # ADX (14) — trend strength, direction-neutral
+    _prev_high = daily["High"].shift(1)
+    _prev_low = daily["Low"].shift(1)
+    _prev_close = daily["Close"].shift(1)
+    _tr = pd.concat([
+        daily["High"] - daily["Low"],
+        (daily["High"] - _prev_close).abs(),
+        (daily["Low"] - _prev_close).abs(),
+    ], axis=1).max(axis=1)
+    _dm_plus_raw = daily["High"] - _prev_high
+    _dm_minus_raw = _prev_low - daily["Low"]
+    _plus_dm = _dm_plus_raw.where(
+        (_dm_plus_raw > _dm_minus_raw) & (_dm_plus_raw > 0), 0
+    )
+    _minus_dm = _dm_minus_raw.where(
+        (_dm_minus_raw > _dm_plus_raw) & (_dm_minus_raw > 0), 0
+    )
+    _atr14 = _tr.ewm(alpha=1 / 14, adjust=False).mean()
+    _plus_di14 = 100 * _plus_dm.ewm(alpha=1 / 14, adjust=False).mean() / _atr14.replace(0, pd.NA)
+    _minus_di14 = 100 * _minus_dm.ewm(alpha=1 / 14, adjust=False).mean() / _atr14.replace(0, pd.NA)
+    _di_sum = (_plus_di14 + _minus_di14).replace(0, pd.NA)
+    _dx = 100 * (_plus_di14 - _minus_di14).abs() / _di_sum
+    daily["adx_14"] = _dx.ewm(alpha=1 / 14, adjust=False).mean()
+    daily["plus_di_14"] = _plus_di14
+    daily["minus_di_14"] = _minus_di14
+
+    # MA alignment: +1 bullish stack, -1 bearish stack, 0 mixed
+    daily["ma_alignment"] = (
+        ((daily["ma_5"] > daily["ma_10"]) & (daily["ma_10"] > daily["ma_20"])).astype(int)
+        - ((daily["ma_5"] < daily["ma_10"]) & (daily["ma_10"] < daily["ma_20"])).astype(int)
+    )
+
+    # Trend consistency: fraction of last 10 days with positive close return
+    daily["trend_consistency_10d"] = (daily["close_ret_1d"] > 0).rolling(10).mean()
+
+    # Volume direction ratio: up-day volume vs down-day volume over last 10 days
+    _up_vol = (daily["Volume"] * (daily["close_ret_1d"] > 0)).rolling(10).sum()
+    _dn_vol = (daily["Volume"] * (daily["close_ret_1d"] <= 0)).rolling(10).sum()
+    daily["vol_direction_ratio"] = _up_vol / _dn_vol.replace(0, pd.NA)
+
     for lag in [1, 2, 3, 5]:
         daily[f"hl_pct_lag_{lag}"] = daily["hl_pct"].shift(lag)
         daily[f"oc_pct_lag_{lag}"] = daily["oc_pct"].shift(lag)

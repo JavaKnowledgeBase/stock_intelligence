@@ -391,6 +391,10 @@ def _build_mover_row(ticker):
     dist_ema_20 = float(pd.to_numeric(latest["dist_ema_20_pct"], errors="coerce"))
     rsi_14 = float(pd.to_numeric(latest.get("rsi_14", 50), errors="coerce"))
     macd_hist = float(pd.to_numeric(latest.get("macd_hist", 0), errors="coerce"))
+    adx_14 = float(pd.to_numeric(latest.get("adx_14", 0), errors="coerce"))
+    ma_alignment = int(pd.to_numeric(latest.get("ma_alignment", 0), errors="coerce"))
+    trend_consistency = float(pd.to_numeric(latest.get("trend_consistency_10d", 0.5), errors="coerce"))
+    vol_dir_ratio = float(pd.to_numeric(latest.get("vol_direction_ratio", 1.0), errors="coerce"))
 
     # 30-day annualized historical volatility
     try:
@@ -415,19 +419,34 @@ def _build_mover_row(ticker):
     # MACD histogram additive adjustment
     macd_adj = 1.5 if macd_hist > 0 else -1.5
 
+    # ADX trend strength: weak trend penalizes both sides; strong trend rewards aligned side
+    adx_strength = -2.0 if adx_14 < 20 else (2.5 if adx_14 > 40 else (2.0 if adx_14 >= 25 else 0.0))
+
+    # MA alignment: +1 bullish stack boosts upside, -1 bearish stack boosts downside
+    ma_adj_up = 2.0 if ma_alignment == 1 else (-2.0 if ma_alignment == -1 else 0.0)
+    ma_adj_dn = -ma_adj_up
+
+    # Trend consistency: fraction of last 10 days with positive returns
+    tc_adj_up = 1.5 if trend_consistency > 0.6 else (-1.5 if trend_consistency < 0.4 else 0.0)
+    tc_adj_dn = -tc_adj_up
+
+    # Volume direction ratio: up-day vs down-day volume
+    vd_adj_up = 1.0 if vol_dir_ratio > 1.2 else (-1.0 if vol_dir_ratio < 0.8 else 0.0)
+    vd_adj_dn = -vd_adj_up
+
     one_week_upside = (
         trend_factor * 0.9
         + swing_factor * 0.8
         + max(volume_factor - 1, 0) * 6
         + max(extension_factor, 0) * 0.35
-        + rsi_adj_up + macd_adj
+        + rsi_adj_up + macd_adj + adx_strength + ma_adj_up + tc_adj_up + vd_adj_up
     )
     one_week_downside = (
         (-trend_factor) * 0.9
         + swing_factor * 0.8
         + max(volume_factor - 1, 0) * 6
         + max(-extension_factor, 0) * 0.35
-        + rsi_adj_dn + (-macd_adj)
+        + rsi_adj_dn + (-macd_adj) + adx_strength + ma_adj_dn + tc_adj_dn + vd_adj_dn
     )
 
     one_month_upside = (
@@ -435,14 +454,14 @@ def _build_mover_row(ticker):
         + swing_factor * 0.9
         + max(volume_factor - 1, 0) * 8
         + max(extension_factor, 0) * 0.45
-        + rsi_adj_up + macd_adj
+        + rsi_adj_up + macd_adj + adx_strength + ma_adj_up + tc_adj_up + vd_adj_up
     )
     one_month_downside = (
         (-trend_factor) * 1.1
         + swing_factor * 0.9
         + max(volume_factor - 1, 0) * 8
         + max(-extension_factor, 0) * 0.45
-        + rsi_adj_dn + (-macd_adj)
+        + rsi_adj_dn + (-macd_adj) + adx_strength + ma_adj_dn + tc_adj_dn + vd_adj_dn
     )
 
     direction_1w = "Grow Rapidly" if one_week_upside >= one_week_downside else "Fall Steeply"
@@ -462,6 +481,7 @@ def _build_mover_row(ticker):
         "volatility_5d": round(vol_5d, 2),
         "volume_ratio_5": round(volume_ratio_5, 2),
         "rsi_14": round(rsi_14, 1),
+        "adx_14": round(adx_14, 1),
         "hv_30d": round(hv_30d, 2),
     }
 
@@ -647,6 +667,7 @@ def _build_strategy_recommendation(row):
     underlying_move_pct = abs(float(row["ret_5d"]))
     contract_side = contract["contract_type"]
     rsi = float(row.get("rsi_14", 50) or 50)
+    adx = float(row.get("adx_14", 0) or 0)
 
     mid_price = (contract["bid"] + contract["ask"]) / 2 if contract["ask"] > 0 else contract["option_value"]
     mid_price = round(mid_price, 2)
@@ -695,6 +716,7 @@ def _build_strategy_recommendation(row):
         "contract_quality_score": contract["contract_quality_score"],
         "iv_hv_ratio": contract.get("iv_hv_ratio"),
         "rsi_14": round(rsi, 1),
+        "adx_14": round(adx, 1),
         "strategy_score": round(float(row["strategy_score"]), 2),
         "day_volume_share": round(float(row["percent_of_day_total"]), 2),
         "underlying_5d_move": round(underlying_move_pct, 2),

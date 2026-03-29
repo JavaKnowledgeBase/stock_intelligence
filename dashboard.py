@@ -160,7 +160,7 @@ def format_strategy_table(df):
         "contract_quality_score", "strategy_score", "day_volume_share",
         "underlying_5d_move",
     ]
-    optional_cols = ["rsi_14", "iv_hv_ratio"]
+    optional_cols = ["rsi_14", "adx_14", "iv_hv_ratio"]
     text_cols = ["entry_rule", "stop_rule", "take_profit_rule", "midday_check", "daily_plan"]
 
     available = base_cols + [c for c in optional_cols if c in df.columns] + text_cols
@@ -183,6 +183,7 @@ def format_strategy_table(df):
         "day_volume_share": "% of Day Volume",
         "underlying_5d_move": "Underlying 5D Move %",
         "rsi_14": "RSI (14)",
+        "adx_14": "ADX (14)",
         "iv_hv_ratio": "IV/HV Ratio",
         "entry_rule": "Entry Rule",
         "stop_rule": "Stop Rule",
