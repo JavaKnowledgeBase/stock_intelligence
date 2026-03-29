@@ -6,6 +6,8 @@ Created on Mon Mar  2 06:54:23 2026
 """
 
 import concurrent.futures
+import os
+import subprocess
 
 import pandas as pd
 import plotly.express as px
@@ -31,7 +33,37 @@ ensure_assets_available()
 
 st.set_page_config(layout="wide")
 
+
+@st.cache_data(show_spinner=False)
+def get_build_label():
+    env_candidates = [
+        os.getenv("STREAMLIT_BUILD_COMMIT"),
+        os.getenv("GITHUB_SHA"),
+        os.getenv("COMMIT_SHA"),
+    ]
+    for value in env_candidates:
+        if value:
+            return value[:7]
+
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        commit = result.stdout.strip()
+        if commit:
+            return commit
+    except Exception:
+        pass
+
+    return "unknown"
+
+
 st.title("Institutional Options Intelligence Platform")
+st.caption(f"Branch: `main` | Build: `{get_build_label()}`")
 
 
 # =========================
@@ -158,7 +190,7 @@ def format_strategy_table(df):
     base_cols = [
         "ticker", "horizon", "view", "contract_type", "expiration", "strike_price",
         "option_value", "bid", "ask", "spread_pct", "open_interest", "option_volume",
-        "contract_quality_score", "strategy_score", "day_volume_share",
+        "contract_quality_score", "strategy_score", "strategy_confidence", "day_volume_share",
         "underlying_5d_move",
     ]
     optional_cols = ["rsi_14", "adx_14", "iv_hv_ratio"]
@@ -182,6 +214,7 @@ def format_strategy_table(df):
         "option_volume": "Option Volume",
         "contract_quality_score": "Contract Quality",
         "strategy_score": "Strategy Score",
+        "strategy_confidence": "Confidence %",
         "day_volume_share": "% of Day Volume",
         "underlying_5d_move": "Underlying 5D Move %",
         "rsi_14": "RSI (14)",
@@ -493,7 +526,7 @@ with tab4:
         )
         st.caption(
             "Idea-level daily strategy suggestions for a roughly one-month expiry. "
-            "Intended as a watchlist, not a guarantee."
+            "Rows below the confidence threshold are filtered out before display."
         )
 
         # Trade rules: pivot so rules are rows and tickers are columns
@@ -659,6 +692,7 @@ with tab6:
         "one_week_view": "1W Direction",
         "est_1w_pct": "Est. 1W Move %",
         "est_2w_pct": "Est. 2W Move %",
+        "forecast_confidence": "Confidence %",
         "rsi_14": "RSI (14)",
         "adx_14": "ADX (14)",
         "volatility_5d": "5D Range %",
