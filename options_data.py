@@ -562,15 +562,19 @@ def build_price_forecast_table(tickers, top_n=10):
         return pd.DataFrame(), pd.DataFrame()
 
     df = movers_df.copy()
+    df = df.dropna(subset=["one_week_score", "one_month_score", "volatility_5d"]).reset_index(drop=True)
+
+    if df.empty:
+        return pd.DataFrame(), pd.DataFrame()
 
     # 2-week score: blend of 1-week and 1-month
-    df["two_week_score"] = df["one_week_score"] * 0.6 + df["one_month_score"] * 0.4
+    df["two_week_score"] = df["one_week_score"].astype(float) * 0.6 + df["one_month_score"].astype(float) * 0.4
 
     # Convert scores to % estimates, capped by each ticker's own volatility range
-    vol_cap = (df["volatility_5d"] * 5).clip(lower=2.0)
+    vol_cap = (df["volatility_5d"].astype(float) * 5).clip(lower=2.0).values
 
-    df["est_1w_pct"] = (df["one_week_score"] * 0.35).clip(upper=vol_cap)
-    df["est_2w_pct"] = (df["two_week_score"] * 0.45).clip(upper=vol_cap * 1.4)
+    df["est_1w_pct"] = np.minimum(df["one_week_score"].astype(float) * 0.35, vol_cap)
+    df["est_2w_pct"] = np.minimum(df["two_week_score"].astype(float) * 0.45, vol_cap * 1.4)
 
     # Apply direction sign
     up_mask_1w = df["one_week_view"] == "Grow Rapidly"
