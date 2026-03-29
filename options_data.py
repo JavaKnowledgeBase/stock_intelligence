@@ -430,9 +430,12 @@ def _build_mover_row_inner(ticker):
     ma_alignment = int(_ma_align_raw) if pd.notna(_ma_align_raw) else 0
     trend_consistency = float(pd.to_numeric(latest.get("trend_consistency_10d", 0.5), errors="coerce"))
     vol_dir_ratio = float(pd.to_numeric(latest.get("vol_direction_ratio", 1.0), errors="coerce"))
-    atr_14 = float(pd.to_numeric(latest.get("atr_14", 0), errors="coerce"))
-    obv_slope = float(pd.to_numeric(latest.get("obv_slope_10d", 0), errors="coerce"))
-    pct_from_52w_high = float(pd.to_numeric(latest.get("pct_from_52w_high", -50), errors="coerce"))
+    _atr_raw = pd.to_numeric(latest.get("atr_14", np.nan), errors="coerce")
+    atr_14 = float(_atr_raw) if pd.notna(_atr_raw) and _atr_raw > 0 else close_price * 0.015
+    _obv_raw = pd.to_numeric(latest.get("obv_slope_10d", np.nan), errors="coerce")
+    obv_slope = float(_obv_raw) if pd.notna(_obv_raw) else 0.0
+    _52w_raw = pd.to_numeric(latest.get("pct_from_52w_high", np.nan), errors="coerce")
+    pct_from_52w_high = float(_52w_raw) if pd.notna(_52w_raw) else -50.0
 
     # Relative strength vs SPY (ticker 5d return minus SPY 5d return)
     spy_ret_5d = _get_spy_ret_5d()

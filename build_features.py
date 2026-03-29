@@ -42,13 +42,6 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     """
     Build technical features from daily OHLCV data.
     """
-    try:
-        return _build_features_inner(df)
-    except Exception:
-        return pd.DataFrame()
-
-
-def _build_features_inner(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame()
 
@@ -204,7 +197,33 @@ def _build_features_inner(df: pd.DataFrame) -> pd.DataFrame:
         daily[f"close_ret_lag_{lag}"] = daily["close_ret_1d"].shift(lag)
         daily[f"volume_ratio_5_lag_{lag}"] = daily["volume_ratio_5"].shift(lag)
 
-    daily = daily.replace([pd.NA, float("inf"), float("-inf")], pd.NA)
-    daily = daily.dropna().copy()
+    # Replace inf with nan first
+    daily = daily.replace([float("inf"), float("-inf")], np.nan)
+
+    # Fill supplementary columns with neutral values so NaN never reaches scoring
+    neutral_fills = {
+        "obv_slope_10d":        0.0,
+        "vol_direction_ratio":  1.0,
+        "trend_consistency_10d": 0.5,
+        "pct_from_52w_high":   -50.0,
+        "pct_from_52w_low":     50.0,
+        "obv":                  0.0,
+        "high_52w":             daily["High"],
+        "low_52w":              daily["Low"],
+    }
+    for col, fill in neutral_fills.items():
+        if col in daily.columns:
+            daily[col] = daily[col].fillna(fill if not isinstance(fill, pd.Series) else fill)
+
+    # atr_14 neutral: ~1.5% of close price
+    if "atr_14" in daily.columns:
+        daily["atr_14"] = daily["atr_14"].fillna(daily["Close"] * 0.015)
+
+    # Drop rows only missing core features
+    core_cols = [
+        "Close", "hl_pct", "close_ret_1d", "close_ret_5d",
+        "volatility_5d", "volume_ratio_5", "rsi_14", "macd_hist", "adx_14",
+    ]
+    daily = daily.dropna(subset=[c for c in core_cols if c in daily.columns]).copy()
 
     return daily
