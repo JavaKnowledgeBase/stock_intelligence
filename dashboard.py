@@ -23,7 +23,10 @@ from options_data import (
     get_options_chain,
 )
 from options_flow import detect_unusual_flow
+from r2_storage import ensure_assets_available
 
+
+ensure_assets_available()
 
 st.set_page_config(layout="wide")
 
@@ -463,8 +466,13 @@ with tab4:
         and strategy_diagnostics is not None
         and strategy_diagnostics["status"] != "data_unavailable"
     ):
+        formatted = format_strategy_table(strategy_df.head(strategy_row_count))
+
+        text_cols = ["Entry Rule", "Stop Rule", "Take Profit Rule", "11 AM Check", "Day Trader Plan"]
+        main_cols = [c for c in formatted.columns if c not in text_cols]
+
         st.dataframe(
-            format_strategy_table(strategy_df.head(strategy_row_count)),
+            formatted[main_cols],
             use_container_width=True,
             hide_index=True,
         )
@@ -472,6 +480,19 @@ with tab4:
             "Idea-level daily strategy suggestions for a roughly one-month expiry. "
             "Intended as a watchlist, not a guarantee."
         )
+
+        # Trade rules: pivot so rules are rows and tickers are columns
+        available_text_cols = [c for c in text_cols if c in formatted.columns]
+        if available_text_cols and "Ticker" in formatted.columns:
+            rules_df = (
+                formatted[["Ticker"] + available_text_cols]
+                .set_index("Ticker")
+                .T
+            )
+            rules_df.index.name = "Rule"
+            st.subheader("Trade Rules")
+            st.dataframe(rules_df, use_container_width=True)
+
     elif strategy_df is None:
         st.info("Click Run Strategy to generate fresh trade ideas.")
 
@@ -537,3 +558,4 @@ with tab5:
             st.plotly_chart(fig, use_container_width=True)
     else:
         st.info("Select a ticker and expiration, then click Run.")
+
