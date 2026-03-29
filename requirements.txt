@@ -8,6 +8,6 @@ yfinance
 jinja2
 boto3
 python-dotenv
-streamlit
+streamlit>=1.35.0
 plotly
 lightgbm
