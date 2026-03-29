@@ -419,7 +419,8 @@ def _build_mover_row(ticker):
     rsi_14 = float(pd.to_numeric(latest.get("rsi_14", 50), errors="coerce"))
     macd_hist = float(pd.to_numeric(latest.get("macd_hist", 0), errors="coerce"))
     adx_14 = float(pd.to_numeric(latest.get("adx_14", 0), errors="coerce"))
-    ma_alignment = int(pd.to_numeric(latest.get("ma_alignment", 0), errors="coerce"))
+    _ma_align_raw = pd.to_numeric(latest.get("ma_alignment", 0), errors="coerce")
+    ma_alignment = int(_ma_align_raw) if pd.notna(_ma_align_raw) else 0
     trend_consistency = float(pd.to_numeric(latest.get("trend_consistency_10d", 0.5), errors="coerce"))
     vol_dir_ratio = float(pd.to_numeric(latest.get("vol_direction_ratio", 1.0), errors="coerce"))
     atr_14 = float(pd.to_numeric(latest.get("atr_14", 0), errors="coerce"))

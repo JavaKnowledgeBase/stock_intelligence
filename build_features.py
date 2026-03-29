@@ -169,11 +169,14 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     daily["vol_direction_ratio"] = _up_vol / _dn_vol.replace(0, pd.NA)
 
     # OBV and OBV slope (10-day % change)
-    _obv_direction = daily["Close"].diff().apply(lambda x: 1 if x > 0 else (-1 if x < 0 else 0))
-    _obv = (daily["Volume"] * _obv_direction).cumsum()
+    # Use boolean arithmetic to guarantee numeric dtype (avoids object Series from apply)
+    _close_diff = daily["Close"].diff()
+    _obv_direction = ((_close_diff > 0).astype(int) - (_close_diff < 0).astype(int))
+    _obv = (daily["Volume"].astype(float) * _obv_direction).cumsum()
     daily["obv"] = _obv
-    _obv_10_ago = _obv.shift(10).replace(0, pd.NA)
-    daily["obv_slope_10d"] = (_obv - _obv.shift(10)) / _obv_10_ago.abs() * 100
+    _obv_10_ago = _obv.shift(10)
+    _obv_10_ago_safe = _obv_10_ago.where(_obv_10_ago.abs() > 0)  # NaN where 0
+    daily["obv_slope_10d"] = (_obv - _obv_10_ago) / _obv_10_ago_safe.abs() * 100
 
     # 52-week high/low proximity (% from rolling high/low using available history)
     _lookback = min(252, len(daily))
