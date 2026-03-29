@@ -526,7 +526,7 @@ with tab4:
         )
         st.caption(
             "Idea-level daily strategy suggestions for a roughly one-month expiry. "
-            "Rows below the confidence threshold are filtered out before display."
+            "Rows below the confidence threshold are filtered out before display. Confidence lower than 0.7 may not be recommended."
         )
 
         # Trade rules: pivot so rules are rows and tickers are columns

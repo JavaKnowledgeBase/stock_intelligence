@@ -640,7 +640,7 @@ def build_price_forecast_table(tickers, top_n=10):
         * np.clip(df["volume_ratio_5"] / 1.5, 0.75, 1.15)
         * np.clip(1 - (df["rsi_14"].sub(50).abs() / 100.0), 0.70, 1.00)
     )
-    df = df[df["forecast_confidence"] >= 0.72].reset_index(drop=True)
+    df = df[df["forecast_confidence"] >= 0.60].reset_index(drop=True)
 
     if df.empty:
         return pd.DataFrame(), pd.DataFrame()
@@ -1064,7 +1064,7 @@ def build_strategy_table(tickers, top_n=10):
         * np.clip(combined["volume_ratio_5"] / 1.5, 0.75, 1.15)
         * np.clip(1 - (combined["rsi_14"].sub(50).abs() / 100.0), 0.70, 1.00)
     )
-    combined = combined[combined["strategy_confidence"] >= 0.72].copy()
+    combined = combined[combined["strategy_confidence"] >= 0.60].copy()
 
     if combined.empty:
         diagnostics["status"] = "data_unavailable"
