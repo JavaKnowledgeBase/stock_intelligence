@@ -1139,6 +1139,7 @@ def build_strategy_table(tickers, top_n=10):
     candidates = pd.DataFrame(expanded_rows) if expanded_rows else pd.DataFrame()
 
     recommendations = []
+    failed_recommendations = 0
     max_workers = min(8, len(candidates) or 1)
 
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
@@ -1150,9 +1151,15 @@ def build_strategy_table(tickers, top_n=10):
         diagnostics["contracts_evaluated"] = len(futures)
 
         for future in as_completed(futures):
-            recommendation = future.result()
+            try:
+                recommendation = future.result()
+            except Exception:
+                failed_recommendations += 1
+                continue
             if recommendation:
                 recommendations.append(recommendation)
+
+    diagnostics["contract_errors"] = failed_recommendations
 
     if recommendations:
         # Sort: SPY first (market context), then by strategy score

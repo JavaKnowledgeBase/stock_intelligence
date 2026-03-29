@@ -6,3 +6,4 @@ data/options_market_snapshots/
 *.csv
 *.log
 .env
+reports/
