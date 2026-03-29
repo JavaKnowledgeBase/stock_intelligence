@@ -8,6 +8,7 @@ def render_app():
     st.set_page_config(page_title="Options Screener", layout="wide")
 
     st.title("Advanced Options Screener")
+    st.caption("Branch: `master`")
 
     mode = st.selectbox(
         "Select Data Period",

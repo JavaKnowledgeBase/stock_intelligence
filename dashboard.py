@@ -6,6 +6,8 @@ Created on Mon Mar  2 06:54:23 2026
 """
 
 import concurrent.futures
+import os
+import subprocess
 
 import pandas as pd
 import plotly.express as px
@@ -31,7 +33,37 @@ ensure_assets_available()
 
 st.set_page_config(layout="wide")
 
+
+@st.cache_data(show_spinner=False)
+def get_build_label():
+    env_candidates = [
+        os.getenv("STREAMLIT_BUILD_COMMIT"),
+        os.getenv("GITHUB_SHA"),
+        os.getenv("COMMIT_SHA"),
+    ]
+    for value in env_candidates:
+        if value:
+            return value[:7]
+
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        commit = result.stdout.strip()
+        if commit:
+            return commit
+    except Exception:
+        pass
+
+    return "unknown"
+
+
 st.title("Institutional Options Intelligence Platform")
+st.caption(f"Branch: `master` | Build: `{get_build_label()}`")
 
 
 # =========================
