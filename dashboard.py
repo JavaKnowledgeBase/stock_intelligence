@@ -503,6 +503,58 @@ with tab4:
             st.subheader("Trade Rules")
             st.dataframe(rules_df, use_container_width=True)
 
+        # Best times to run guide
+        st.subheader("Best Times to Run Strategy")
+        best_times = pd.DataFrame([
+            {
+                "Time (ET)":       "9:45 – 10:15 AM",
+                "Day":             "Tue – Thu",
+                "Horizon Focus":   "Next Fri / Fri+2 (others) · All SPY horizons",
+                "Why":             "Open noise settled, real volume confirming direction, tightest spreads",
+                "Avoid If":        "Major news pre-announced (Fed, CPI, earnings on your tickers)",
+            },
+            {
+                "Time (ET)":       "11:00 – 11:30 AM",
+                "Day":             "Tue – Thu",
+                "Horizon Focus":   "Next Fri / Fri+2 (others) · SPY +5d / +10d",
+                "Why":             "Trend vs fade is clear, volume confirms or dies — the built-in 11 AM check",
+                "Avoid If":        "SPY is flat ±0.2% — weak regime produces weak signals",
+            },
+            {
+                "Time (ET)":       "Monday 10:00 – 11:00 AM",
+                "Day":             "Monday only",
+                "Horizon Focus":   "SPY +5d / +10d / +15d / +3wk for weekly bias",
+                "Why":             "Gap from weekend resolved, sets tone for the week ahead",
+                "Avoid If":        "Monday follows a 3-day weekend — extra volatility at open",
+            },
+            {
+                "Time (ET)":       "Avoid: 9:30 – 9:40 AM",
+                "Day":             "Any",
+                "Horizon Focus":   "—",
+                "Why":             "First 10 min erratic; spreads wide, volume spikes are noise",
+                "Avoid If":        "Always skip this window",
+            },
+            {
+                "Time (ET)":       "Avoid: Friday after 2 PM",
+                "Day":             "Friday",
+                "Horizon Focus":   "—",
+                "Why":             "Premium sellers crush IV into weekend; Next Fri contracts lose value fast",
+                "Avoid If":        "Always skip — bad pricing for Fri+2 as well",
+            },
+            {
+                "Time (ET)":       "Avoid: Weekends / Pre-market",
+                "Day":             "Sat – Sun",
+                "Horizon Focus":   "—",
+                "Why":             "yfinance returns stale/zero volume data; screener shows 'data unavailable'",
+                "Avoid If":        "Always skip",
+            },
+        ])
+        st.dataframe(best_times, use_container_width=True, hide_index=True)
+        st.caption(
+            "SPY rows give broad market context across 4 time horizons. "
+            "Other tickers use the two nearest Fridays for near-term trade planning."
+        )
+
     elif strategy_df is None:
         st.info("Click Run Strategy to generate fresh trade ideas.")
 
