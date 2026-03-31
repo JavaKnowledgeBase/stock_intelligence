@@ -529,17 +529,37 @@ with tab4:
             "Rows below the confidence threshold are filtered out before display. Confidence lower than 0.7 may not be recommended."
         )
 
-        # Trade rules: pivot so rules are rows and tickers are columns
+        # Trade rules: pivot so rules are rows and ideas are columns.
+        # Streamlit's Arrow serializer requires unique column names.
         available_text_cols = [c for c in text_cols if c in formatted.columns]
         if available_text_cols and "Ticker" in formatted.columns:
+            rules_source = formatted[["Ticker"] + [c for c in ["Horizon", "Expiration"] if c in formatted.columns] + available_text_cols].copy()
+
+            rule_labels = rules_source["Ticker"].astype(str)
+            if "Horizon" in rules_source.columns:
+                rule_labels = rule_labels + " | " + rules_source["Horizon"].astype(str)
+            elif "Expiration" in rules_source.columns:
+                rule_labels = rule_labels + " | " + rules_source["Expiration"].astype(str)
+
+            duplicate_counts = {}
+            unique_labels = []
+            for label in rule_labels:
+                count = duplicate_counts.get(label, 0) + 1
+                duplicate_counts[label] = count
+                unique_labels.append(f"{label} #{count}" if count > 1 else label)
+
+            rules_source["Rule Label"] = unique_labels
             rules_df = (
-                formatted[["Ticker"] + available_text_cols]
-                .set_index("Ticker")
+                rules_source[["Rule Label"] + available_text_cols]
+                .set_index("Rule Label")
                 .T
             )
             rules_df.index.name = "Rule"
+            rules_df = rules_df.loc[:, ~rules_df.columns.duplicated()].copy()
+            rules_df = rules_df.fillna("").map(str)
+            rules_display_df = rules_df.reset_index()
             st.subheader("Trade Rules")
-            st.dataframe(rules_df, use_container_width=True)
+            st.dataframe(rules_display_df, use_container_width=True, hide_index=True)
 
     elif strategy_df is None:
         st.info("Click Run Strategy to generate fresh trade ideas.")

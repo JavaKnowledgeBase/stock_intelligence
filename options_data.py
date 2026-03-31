@@ -38,6 +38,15 @@ _CACHE = {}
 _MAX_WORKERS = 8
 
 
+def _is_rate_limited_error(exc):
+    message = str(exc).lower()
+    return (
+        "too many requests" in message
+        or "rate limited" in message
+        or "429" in message
+    )
+
+
 def _cache_key(prefix, *parts):
     return (prefix, *parts)
 
@@ -104,14 +113,10 @@ def get_price_history(ticker, period="6mo", interval="1d"):
     if cached is not None:
         return _clone_frame(cached)
 
-    history = yf.download(
-        ticker,
-        period=period,
-        interval=interval,
-        progress=False,
-        auto_adjust=False,
-        threads=False,
-    )
+    # Use Ticker.history() instead of yf.download() — download() is not thread-safe
+    # when called in parallel and can return another ticker's data under load.
+    tk = _get_ticker(ticker)
+    history = tk.history(period=period, interval=interval, auto_adjust=False)
     if history is None:
         history = pd.DataFrame()
 
@@ -802,6 +807,18 @@ def _pick_strategy_contract(ticker, contract_type, close_price, hv_30d=0.0, expi
     if filtered.empty:
         return None
 
+    # Hard strike range filter: exclude deep ITM / deep OTM contracts.
+    # Without this, deep-ITM strikes (with years of accumulated OI) dominate
+    # the liquidity score and get picked despite being 20-40% from ATM.
+    if contract_type == "call":
+        strike_range = (filtered["strike"] >= close_price * 0.95) & (filtered["strike"] <= close_price * 1.15)
+    else:
+        strike_range = (filtered["strike"] >= close_price * 0.85) & (filtered["strike"] <= close_price * 1.05)
+    filtered = filtered[strike_range].copy()
+
+    if filtered.empty:
+        return None
+
     # Two-pass liquidity filter: tight first, fallback to loose
     tight = filtered[
         (filtered["volume"] >= 100)
@@ -854,7 +871,7 @@ def _pick_strategy_contract(ticker, contract_type, close_price, hv_30d=0.0, expi
         "expiration": expiry,
         "contract_type": contract_type,
         "strike": round(float(selected["strike"]), 2),
-        "option_value": round(float(selected["last_price"]), 2),
+        "option_value": round(float(selected["mid_price"]), 2),
         "bid": round(float(selected["bid"]), 2),
         "ask": round(float(selected["ask"]), 2),
         "spread_pct": round(float(selected["spread_pct"]), 2),
@@ -982,8 +999,20 @@ def _get_market_regime():
 
 
 def build_strategy_table(tickers, top_n=10):
-    movers_df = build_market_movers_table(tickers)
-    volume_df = build_market_volume_table(tickers)
+    rate_limited = False
+
+    try:
+        movers_df = build_market_movers_table(tickers)
+    except Exception as exc:
+        rate_limited = rate_limited or _is_rate_limited_error(exc)
+        movers_df = pd.DataFrame()
+
+    try:
+        volume_df = build_market_volume_table(tickers)
+    except Exception as exc:
+        rate_limited = rate_limited or _is_rate_limited_error(exc)
+        volume_df = pd.DataFrame()
+
     regime = _get_market_regime()
 
     diagnostics = {
@@ -996,13 +1025,30 @@ def build_strategy_table(tickers, top_n=10):
         "regime": regime,
         "status": "ok",
         "message": "",
+        "rate_limited": rate_limited,
+        "expiration_errors": 0,
     }
 
     if movers_df.empty or volume_df.empty:
+        missing_sources = []
+        if movers_df.empty:
+            missing_sources.append("rapid movers")
+        if volume_df.empty:
+            missing_sources.append("market volume")
+
         diagnostics["status"] = "data_unavailable"
-        diagnostics["message"] = (
-            "Yahoo data was incomplete or unavailable for the latest run."
-        )
+        if diagnostics["rate_limited"]:
+            diagnostics["message"] = (
+                "Yahoo rate limited the latest strategy scan; "
+                f"missing {', '.join(missing_sources)} data "
+                f"(movers rows: {diagnostics['movers_found']}, volume rows: {diagnostics['volume_rows_found']})."
+            )
+        else:
+            diagnostics["message"] = (
+                "Latest Yahoo-backed scan was incomplete: "
+                f"missing {', '.join(missing_sources)} data "
+                f"(movers rows: {diagnostics['movers_found']}, volume rows: {diagnostics['volume_rows_found']})."
+            )
         return pd.DataFrame(), diagnostics
 
     combined = movers_df.merge(
@@ -1124,7 +1170,12 @@ def build_strategy_table(tickers, top_n=10):
             labels = friday_labels
 
         for target, label in zip(targets, labels):
-            expiry = _get_expiration_near_date(ticker, target)
+            try:
+                expiry = _get_expiration_near_date(ticker, target)
+            except Exception as exc:
+                diagnostics["expiration_errors"] += 1
+                diagnostics["rate_limited"] = diagnostics["rate_limited"] or _is_rate_limited_error(exc)
+                continue
             if not expiry:
                 continue
             key = (ticker, expiry)
@@ -1153,8 +1204,9 @@ def build_strategy_table(tickers, top_n=10):
         for future in as_completed(futures):
             try:
                 recommendation = future.result()
-            except Exception:
+            except Exception as exc:
                 failed_recommendations += 1
+                diagnostics["rate_limited"] = diagnostics["rate_limited"] or _is_rate_limited_error(exc)
                 continue
             if recommendation:
                 recommendations.append(recommendation)
@@ -1175,15 +1227,26 @@ def build_strategy_table(tickers, top_n=10):
     diagnostics["contracts_selected"] = len(recommendations)
 
     if not recommendations:
-        diagnostics["status"] = "no_contracts"
-        diagnostics["message"] = (
-            "Signals were found, but no option contracts passed the liquidity and spread filters."
-        )
-    elif len(recommendations) < top_n:
+        if diagnostics["rate_limited"]:
+            diagnostics["status"] = "data_unavailable"
+            diagnostics["message"] = (
+                "Yahoo rate limited the latest strategy scan before option contracts could be collected."
+            )
+        else:
+            diagnostics["status"] = "no_contracts"
+            diagnostics["message"] = (
+                "Signals were found, but no option contracts passed the liquidity and spread filters."
+            )
+    elif len(recommendations) < top_n or diagnostics["rate_limited"]:
         diagnostics["status"] = "partial_results"
-        diagnostics["message"] = (
-            "Only part of the target list was available because some chains were missing or filtered out."
-        )
+        if diagnostics["rate_limited"]:
+            diagnostics["message"] = (
+                "Yahoo rate limited part of the latest strategy scan, so only partial results are shown."
+            )
+        else:
+            diagnostics["message"] = (
+                "Only part of the target list was available because some chains were missing or filtered out."
+            )
     else:
         diagnostics["message"] = "Strategy ideas generated successfully."
 
