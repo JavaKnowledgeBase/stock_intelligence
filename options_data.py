@@ -802,19 +802,29 @@ def _pick_strategy_contract(ticker, contract_type, close_price, hv_30d=0.0, expi
     if filtered.empty:
         return None
 
-    # Two-pass liquidity filter: tight first, fallback to loose
+    # Three-pass liquidity filter: tight → loose → oi-only
+    # Volume can be near zero early in the session; OI is stable all day.
     tight = filtered[
         (filtered["volume"] >= 100)
         & (filtered["open_interest"] >= 100)
         & (filtered["spread_pct"] <= 12)
     ]
-    working = tight if not tight.empty else filtered[
+    loose = filtered[
         (filtered["volume"] >= 50)
         & (filtered["open_interest"] >= 100)
         & (filtered["spread_pct"] <= 18)
     ]
-
-    if working.empty:
+    oi_only = filtered[
+        (filtered["open_interest"] >= 50)
+        & (filtered["spread_pct"] <= 25)
+    ]
+    if not tight.empty:
+        working = tight
+    elif not loose.empty:
+        working = loose
+    elif not oi_only.empty:
+        working = oi_only
+    else:
         return None
 
     target_multiplier = 1.02 if contract_type == "call" else 0.98
