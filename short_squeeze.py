@@ -37,15 +37,19 @@ def _fetch_ticker_data(ticker: str) -> dict | None:
         if market_cap < 5_000_000_000 or price < 10:
             return None
 
-        short_float_pct = _safe(info.get("shortPercentOfFloat"), 0)
-        if short_float_pct is not None and short_float_pct > 1:
-            # yfinance sometimes returns as decimal, sometimes as percent
-            short_float_pct = short_float_pct / 100 if short_float_pct > 1 else short_float_pct
-        short_float_pct = (short_float_pct or 0) * 100  # convert to readable %
-
         days_to_cover = _safe(info.get("shortRatio"), 0)
         shares_short = _safe(info.get("sharesShort"), 0)
         float_shares = _safe(info.get("floatShares"), 1) or 1
+
+        # shortPercentOfFloat is frequently missing; fall back to sharesShort/floatShares
+        raw_spf = _safe(info.get("shortPercentOfFloat"), None)
+        if raw_spf is not None:
+            # yfinance returns as decimal (0.052) or occasionally as percent (5.2)
+            short_float_pct = (raw_spf / 100 if raw_spf > 1 else raw_spf) * 100
+        elif shares_short and float_shares:
+            short_float_pct = (shares_short / float_shares) * 100
+        else:
+            short_float_pct = 0.0
 
         # Price history for momentum / volume
         hist = yf.download(ticker, period="3mo", interval="1d",
