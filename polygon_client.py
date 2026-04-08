@@ -81,16 +81,23 @@ def get_snapshot(ticker: str) -> dict | None:
 
     t = data["ticker"]
     day = t.get("day", {})
+    minute = t.get("min", {})   # most recent 1-min bar — most reliable current price
     prev = t.get("prevDay", {})
+    # day.c is 0 pre-market; fall through to minute bar then lastTrade
+    current_price = (
+        (day.get("c") or None)
+        or (minute.get("c") or None)
+        or (t.get("lastTrade", {}).get("p") or None)
+    )
     result = {
         "ticker": ticker,
-        "price": t.get("lastTrade", {}).get("p") or day.get("c"),
-        "open": day.get("o"),
-        "high": day.get("h"),
-        "low": day.get("l"),
-        "close": day.get("c"),
-        "volume": day.get("v"),
-        "vwap": day.get("vw"),
+        "price": current_price,
+        "open": day.get("o") or minute.get("o"),
+        "high": day.get("h") or minute.get("h"),
+        "low": day.get("l") or minute.get("l"),
+        "close": current_price,
+        "volume": day.get("v") or minute.get("v"),
+        "vwap": day.get("vw") or minute.get("vw"),
         "prev_close": prev.get("c"),
         "change_pct": t.get("todaysChangePerc"),
         "source": "polygon",
@@ -122,14 +129,20 @@ def get_snapshots_batch(tickers: list[str]) -> dict[str, dict]:
     for t in data["tickers"]:
         sym = t.get("ticker", "")
         day = t.get("day", {})
+        minute = t.get("min", {})
         prev = t.get("prevDay", {})
+        current_price = (
+            (day.get("c") or None)
+            or (minute.get("c") or None)
+            or (t.get("lastTrade", {}).get("p") or None)
+        )
         result[sym] = {
             "ticker": sym,
-            "price": t.get("lastTrade", {}).get("p") or day.get("c"),
-            "open": day.get("o"),
-            "high": day.get("h"),
-            "low": day.get("l"),
-            "close": day.get("c"),
+            "price": current_price,
+            "open": day.get("o") or minute.get("o"),
+            "high": day.get("h") or minute.get("h"),
+            "low": day.get("l") or minute.get("l"),
+            "close": current_price,
             "volume": day.get("v"),
             "vwap": day.get("vw"),
             "prev_close": prev.get("c"),
