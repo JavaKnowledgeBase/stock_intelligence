@@ -22,6 +22,11 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 
+try:
+    import polygon_client as _polygon
+except Exception:
+    _polygon = None
+
 # ---------------------------------------------------------------------------
 # Time slots (ET, 30-min buckets covering regular session)
 # ---------------------------------------------------------------------------
@@ -357,15 +362,23 @@ def get_intraday_timing(ticker: str, contract_type: str = "call") -> dict:
     }
 
     try:
-        raw = yf.download(
-            ticker, period="60d", interval="5m",
-            progress=False, auto_adjust=True, threads=False,
-        )
-        if raw is None or raw.empty or len(raw) < 50:
-            empty["error"] = "Insufficient intraday history."
-            return _set_cached(f"{ticker}_{contract_type}", empty)
+        # Try Polygon first for intraday bars
+        df = None
+        if _polygon and _polygon.available():
+            poly_df = _polygon.get_intraday_bars(ticker, days=60)
+            if poly_df is not None and len(poly_df) >= 50:
+                df = poly_df
 
-        df = _flatten(raw)
+        # Fallback to yfinance
+        if df is None:
+            raw = yf.download(
+                ticker, period="60d", interval="5m",
+                progress=False, auto_adjust=True, threads=False,
+            )
+            if raw is None or raw.empty or len(raw) < 50:
+                empty["error"] = "Insufficient intraday history."
+                return _set_cached(f"{ticker}_{contract_type}", empty)
+            df = _flatten(raw)
 
         # Restrict to regular session 09:30–16:00
         df = df.between_time("09:30", "16:00")

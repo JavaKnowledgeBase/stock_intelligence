@@ -23,6 +23,8 @@ try:
 except Exception:
     _FINVIZ_AVAILABLE = False
 
+import polygon_client as _polygon
+
 _CACHE_TTL_SECONDS = 900
 _PRICE_COLS = {"Open", "High", "Low", "Close", "Volume", "Adj Close"}
 
@@ -172,8 +174,19 @@ def get_price_history(ticker, period="6mo", interval="1d"):
     if cached is not None:
         return _clone_frame(cached)
 
-    # Use Ticker.history() instead of yf.download() — download() is not thread-safe
-    # when called in parallel and can return another ticker's data under load.
+    # Try Polygon first (better reliability, real-time on paid tier)
+    if _polygon.available() and interval == "1d":
+        _period_days = {
+            "1mo": 35, "3mo": 95, "6mo": 185, "1y": 370,
+            "2y": 740, "5y": 1830,
+        }
+        days = _period_days.get(period, 370)
+        poly_df = _polygon.get_daily_bars(ticker, days=days)
+        if poly_df is not None and not poly_df.empty:
+            _set_cached(key, poly_df.copy())
+            return poly_df
+
+    # Fallback: yfinance
     tk = _get_ticker(ticker)
     history = tk.history(period=period, interval=interval, auto_adjust=False)
     if history is None:
@@ -184,6 +197,11 @@ def get_price_history(ticker, period="6mo", interval="1d"):
 
 
 def get_stock_price(ticker):
+    # Try Polygon snapshot first for freshest price
+    if _polygon.available():
+        snap = _polygon.get_snapshot(ticker)
+        if snap and snap.get("price"):
+            return float(snap["price"])
     data = get_price_history(ticker, period="5d")
     return float(data["Close"].iloc[-1])
 
