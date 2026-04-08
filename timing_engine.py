@@ -81,10 +81,22 @@ def _set_cached(ticker: str, result: dict) -> dict:
 # Helpers
 # ---------------------------------------------------------------------------
 
+_OHLCV = {"Open", "High", "Low", "Close", "Volume"}
+
 def _flatten(df: pd.DataFrame) -> pd.DataFrame:
     """Flatten yfinance MultiIndex columns and convert index to ET."""
     if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
+        # Find the level that contains OHLCV names
+        for level in range(df.columns.nlevels):
+            vals = set(df.columns.get_level_values(level))
+            if _OHLCV & vals:
+                df.columns = df.columns.get_level_values(level)
+                break
+        else:
+            df.columns = df.columns.get_level_values(0)
+    # Keep only OHLCV columns to avoid stray Series on iloc
+    keep = [c for c in df.columns if c in _OHLCV]
+    df = df[keep].copy()
     if df.index.tz is not None:
         df.index = df.index.tz_convert("America/New_York")
     else:

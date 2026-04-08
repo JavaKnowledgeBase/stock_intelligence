@@ -773,7 +773,7 @@ with tab7:
     col_sf, col_rows = st.columns(2)
     with col_sf:
         min_short_float = st.slider(
-            "Min Short Float %", min_value=5, max_value=25, value=8,
+            "Min Short Float %", min_value=1, max_value=25, value=3,
             help="Only show stocks where shorts hold at least this % of the float",
         )
     with col_rows:

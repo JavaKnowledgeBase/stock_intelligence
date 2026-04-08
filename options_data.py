@@ -938,17 +938,22 @@ def _pick_strategy_contract(ticker, contract_type, close_price, hv_30d=0.0, expi
     if filtered.empty:
         return None
 
-    # Two-pass liquidity filter: tight first, fallback to loose
+    # Three-pass liquidity filter: tight → loose → any liquid contract
     tight = filtered[
-        (filtered["volume"] >= 100)
-        & (filtered["open_interest"] >= 100)
-        & (filtered["spread_pct"] <= 12)
-    ]
-    working = tight if not tight.empty else filtered[
         (filtered["volume"] >= 50)
         & (filtered["open_interest"] >= 100)
-        & (filtered["spread_pct"] <= 18)
+        & (filtered["spread_pct"] <= 15)
     ]
+    loose = filtered[
+        (filtered["volume"] >= 10)
+        & (filtered["open_interest"] >= 50)
+        & (filtered["spread_pct"] <= 25)
+    ]
+    any_liquid = filtered[
+        (filtered["open_interest"] >= 10)
+        & (filtered["spread_pct"] <= 40)
+    ]
+    working = tight if not tight.empty else (loose if not loose.empty else any_liquid)
 
     if working.empty:
         return None
