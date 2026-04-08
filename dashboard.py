@@ -28,6 +28,7 @@ from options_data import (
 from options_flow import detect_unusual_flow
 from r2_storage import ensure_assets_available
 from short_squeeze import scan_short_squeeze
+from timing_engine import get_intraday_timing_batch, _SLOT_LABELS as TIMING_SLOT_LABELS
 
 
 ensure_assets_available()
@@ -259,12 +260,14 @@ for state_key, default_value in [
     ("forecast_fetched_at", None),
     ("squeeze_df", None),
     ("squeeze_fetched_at", None),
+    ("timing_results", None),
+    ("timing_fetched_at", None),
 ]:
     if state_key not in st.session_state:
         st.session_state[state_key] = default_value
 
 
-tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
     "Market Options Screener",
     "Market Volume Leaders",
     "Rapid Movers",
@@ -272,6 +275,7 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "Options Chain Explorer",
     "Price Forecast",
     "Short Squeeze Scanner",
+    "Intraday Timing",
 ])
 
 
@@ -882,4 +886,178 @@ with tab7:
         st.warning(f"No tickers met the minimum short float threshold of {min_short_float}%. Try lowering the filter.")
     else:
         st.info("Click **Run Short Squeeze Scanner** to find squeeze candidates.")
+
+
+# =========================
+# INTRADAY TIMING
+# =========================
+
+with tab8:
+
+    st.markdown(
+        "Estimates optimal **buy and sell windows** for each ticker based on 60 days of "
+        "5-minute historical data. Shows average slot returns, volume profile, gap behaviour, "
+        "and a plain-English recommendation per ticker. Data is cached for 4 hours."
+    )
+
+    col_run, col_info = st.columns([1, 4])
+    with col_run:
+        run_timing = st.button("Run Intraday Timing", use_container_width=True)
+    with col_info:
+        if st.session_state["timing_fetched_at"]:
+            st.caption(f"Last run: {st.session_state['timing_fetched_at']}")
+
+    col_t1, col_t2 = st.columns(2)
+    with col_t1:
+        timing_tickers_input = st.text_input(
+            "Tickers (comma-separated, or leave blank to use Market Universe)",
+            value="",
+            placeholder="e.g. AAPL, NVDA, TSLA",
+        )
+    with col_t2:
+        timing_contract = st.selectbox("Direction", ["call", "put", "both"], index=0)
+
+    if run_timing:
+        raw_input = timing_tickers_input.strip()
+        if raw_input:
+            timing_ticker_list = [t.strip().upper() for t in raw_input.split(",") if t.strip()]
+        else:
+            timing_ticker_list = MARKET_SCAN_TICKERS
+
+        if timing_contract == "both":
+            pairs = [(t, "call") for t in timing_ticker_list] + [(t, "put") for t in timing_ticker_list]
+        else:
+            pairs = [(t, timing_contract) for t in timing_ticker_list]
+
+        st.session_state["timing_results"] = None
+        with st.spinner(f"Analysing {len(timing_ticker_list)} tickers × {'2 directions' if timing_contract == 'both' else '1 direction'}…"):
+            results = get_intraday_timing_batch(pairs, workers=6)
+            st.session_state["timing_results"] = results
+            st.session_state["timing_fetched_at"] = _now()
+
+    timing_results = st.session_state["timing_results"]
+
+    if timing_results:
+        # Build summary table
+        summary_rows = []
+        for (ticker, ct), data in sorted(timing_results.items()):
+            if data.get("error"):
+                continue
+            summary_rows.append({
+                "Ticker": ticker,
+                "Direction": ct.upper(),
+                "Best Entry": data["best_entry_window"],
+                "Best Exit": data["best_exit_window"],
+                "Gap Fade %": f"{data['gap_fade_prob']:.0f}%" if data["gap_fade_prob"] is not None else "—",
+                "Days Analysed": data["n_days"],
+            })
+
+        if summary_rows:
+            st.subheader("Summary — Optimal Windows")
+            st.dataframe(
+                pd.DataFrame(summary_rows),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+        # Detailed expandable card per ticker
+        st.subheader("Ticker Detail — Volume Profile & Slot Returns")
+
+        seen = set()
+        for (ticker, ct), data in sorted(timing_results.items()):
+            card_key = f"{ticker}_{ct}"
+            if card_key in seen:
+                continue
+            seen.add(card_key)
+
+            if data.get("error"):
+                with st.expander(f"{ticker} ({ct.upper()}) — ⚠️ {data['error']}"):
+                    st.warning(data["error"])
+                continue
+
+            entry_w = data["best_entry_window"]
+            exit_w = data["best_exit_window"]
+            n_days = data["n_days"]
+
+            with st.expander(
+                f"{ticker} ({ct.upper()}) — Entry: {entry_w}  |  Exit: {exit_w}  |  {n_days}d history"
+            ):
+                # Timing note
+                st.markdown("**Recommendation**")
+                st.info(data["timing_note"])
+
+                # Slot table
+                slot_df = pd.DataFrame({
+                    "Time Slot": TIMING_SLOT_LABELS,
+                    "Avg Return %": data["avg_return_by_slot"],
+                    "Win Rate %": data["win_rate_by_slot"],
+                    "Vol vs Avg": data["volume_profile"],
+                })
+                slot_df["Avg Return %"] = slot_df["Avg Return %"].round(3)
+                slot_df["Win Rate %"] = slot_df["Win Rate %"].round(1)
+                slot_df["Vol vs Avg"] = slot_df["Vol vs Avg"].round(2)
+
+                # Highlight best entry/exit rows
+                entry_label = data["best_entry_window"]
+                exit_label = data["best_exit_window"]
+
+                def _highlight_slots(row):
+                    if row["Time Slot"] == entry_label:
+                        return ["background-color: #1a472a; color: white"] * len(row)
+                    if row["Time Slot"] == exit_label:
+                        return ["background-color: #1a3a5c; color: white"] * len(row)
+                    return [""] * len(row)
+
+                st.dataframe(
+                    slot_df.style.apply(_highlight_slots, axis=1),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+                # Volume bar chart
+                fig_vol = px.bar(
+                    slot_df,
+                    x="Time Slot",
+                    y="Vol vs Avg",
+                    title=f"{ticker} — Volume Profile (vs daily avg)",
+                    color="Vol vs Avg",
+                    color_continuous_scale="Blues",
+                )
+                fig_vol.update_layout(
+                    xaxis_tickangle=-45,
+                    coloraxis_showscale=False,
+                    height=300,
+                    margin=dict(t=40, b=80),
+                )
+                fig_vol.add_hline(y=1.0, line_dash="dot", line_color="gray",
+                                  annotation_text="Avg", annotation_position="top right")
+                st.plotly_chart(fig_vol, use_container_width=True)
+
+                # Return bar chart
+                fig_ret = px.bar(
+                    slot_df,
+                    x="Time Slot",
+                    y="Avg Return %",
+                    title=f"{ticker} ({ct.upper()}) — Avg Slot Return over {n_days} days",
+                    color="Avg Return %",
+                    color_continuous_scale="RdYlGn",
+                    color_continuous_midpoint=0,
+                )
+                fig_ret.update_layout(
+                    xaxis_tickangle=-45,
+                    coloraxis_showscale=False,
+                    height=300,
+                    margin=dict(t=40, b=80),
+                )
+                fig_ret.add_hline(y=0, line_dash="dot", line_color="gray")
+                st.plotly_chart(fig_ret, use_container_width=True)
+
+        st.caption(
+            "Based on 60 days of 5-min yfinance data. Slot returns are averages — "
+            "actual performance varies. Gap fade probability is computed from days where the "
+            "opening gap was ≥0.5% vs prior close. Green row = suggested entry, blue = suggested exit."
+        )
+
+    else:
+        st.info("Enter tickers (or leave blank for market universe) and click **Run Intraday Timing**.")
 
