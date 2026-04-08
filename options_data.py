@@ -17,8 +17,67 @@ import yfinance as yf
 from config import DATA_DIR
 from build_features import build_features
 
+try:
+    from finvizfinance.quote import finvizfinance as _finviz_quote
+    _FINVIZ_AVAILABLE = True
+except Exception:
+    _FINVIZ_AVAILABLE = False
+
 _CACHE_TTL_SECONDS = 900
 _PRICE_COLS = {"Open", "High", "Low", "Close", "Volume", "Adj Close"}
+
+
+def _parse_finviz_earnings(raw: str | None) -> "pd.Timestamp | None":
+    """Parse a Finviz earnings string like 'Feb 25 AMC' into a Timestamp."""
+    if not raw or raw.strip() in ("-", "N/A", ""):
+        return None
+    try:
+        clean = raw.replace(" AMC", "").replace(" BMO", "").strip()
+        today = pd.Timestamp.now().normalize()
+        parsed = pd.Timestamp(f"{clean} {today.year}")
+        # If the date already passed more than 7 days ago, assume next year
+        if parsed < today - pd.Timedelta(days=7):
+            parsed = pd.Timestamp(f"{clean} {today.year + 1}")
+        return parsed
+    except Exception:
+        return None
+
+
+def _finviz_fundamentals(ticker: str) -> dict:
+    """
+    Fetch analyst recommendation, price target, earnings date, and insider
+    transaction % from Finviz. Results are cached for the standard TTL.
+    Returns a dict with None values on any failure.
+    """
+    empty = {"recom": None, "target_price": None, "earnings_ts": None, "insider_trans_pct": None}
+    if not _FINVIZ_AVAILABLE:
+        return empty
+    cache_key = _cache_key("finviz_fund", ticker)
+    cached = _get_cached(cache_key)
+    if cached is not None:
+        return cached
+    result = dict(empty)
+    try:
+        data = _finviz_quote(ticker).ticker_fundament()
+        raw_recom = data.get("Recom", "")
+        try:
+            result["recom"] = float(raw_recom) if raw_recom else None
+        except (ValueError, TypeError):
+            pass
+        raw_tp = data.get("Target Price", "").replace(",", "").strip()
+        try:
+            result["target_price"] = float(raw_tp) if raw_tp else None
+        except (ValueError, TypeError):
+            pass
+        result["earnings_ts"] = _parse_finviz_earnings(data.get("Earnings", ""))
+        raw_it = data.get("Insider Trans", "").replace("%", "").strip()
+        try:
+            result["insider_trans_pct"] = float(raw_it) if raw_it else None
+        except (ValueError, TypeError):
+            pass
+    except Exception:
+        pass
+    return _set_cached(cache_key, result)
 
 
 def _flatten_df_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -469,6 +528,17 @@ def _build_mover_row_inner(ticker):
     obv_slope = _safe_float(latest.get("obv_slope_10d", np.nan), default=0.0)
     pct_from_52w_high = _safe_float(latest.get("pct_from_52w_high", np.nan), default=-50.0)
 
+    # Finviz fundamentals: analyst recom, price target, earnings, insider activity
+    fv = _finviz_fundamentals(ticker)
+    fv_recom = fv["recom"]                      # 1.0 (Strong Buy) → 5.0 (Strong Sell)
+    fv_target = fv["target_price"]
+    fv_earnings_ts = fv["earnings_ts"]
+    fv_insider = fv["insider_trans_pct"]
+    target_upside_pct = (
+        round((fv_target / close_price - 1) * 100, 1)
+        if fv_target and close_price > 0 else None
+    )
+
     # Relative strength vs SPY (ticker 5d return minus SPY 5d return)
     spy_ret_5d = _get_spy_ret_5d()
     rel_strength = ret_5d - spy_ret_5d
@@ -521,6 +591,27 @@ def _build_mover_row_inner(ticker):
     rs_adj_up = 1.0 if rel_strength > 2 else (-1.0 if rel_strength < -2 else 0.0)
     rs_adj_dn = -rs_adj_up
 
+    # Analyst recommendation (Finviz): 1=Strong Buy → 5=Strong Sell
+    analyst_adj_up = (
+        1.5 if (fv_recom is not None and fv_recom <= 2.0) else
+        (-1.5 if (fv_recom is not None and fv_recom >= 4.0) else 0.0)
+    )
+    analyst_adj_dn = -analyst_adj_up
+
+    # Analyst price target: strong upside = bullish signal, downside = bearish
+    target_adj_up = (
+        1.0 if (target_upside_pct is not None and target_upside_pct > 15) else
+        (-1.0 if (target_upside_pct is not None and target_upside_pct < -5) else 0.0)
+    )
+    target_adj_dn = -target_adj_up
+
+    # Insider transactions: net buying = mild bullish, heavy selling = mild bearish
+    insider_adj_up = (
+        0.5 if (fv_insider is not None and fv_insider > 2) else
+        (-0.5 if (fv_insider is not None and fv_insider < -5) else 0.0)
+    )
+    insider_adj_dn = -insider_adj_up
+
     one_week_upside = (
         trend_factor * 0.9
         + swing_factor * 0.8
@@ -528,6 +619,7 @@ def _build_mover_row_inner(ticker):
         + max(extension_factor, 0) * 0.35
         + rsi_adj_up + macd_adj + adx_strength + ma_adj_up + tc_adj_up + vd_adj_up
         + obv_adj_up + high52_adj_up + rs_adj_up
+        + analyst_adj_up + target_adj_up + insider_adj_up
     )
     one_week_downside = (
         (-trend_factor) * 0.9
@@ -536,6 +628,7 @@ def _build_mover_row_inner(ticker):
         + max(-extension_factor, 0) * 0.35
         + rsi_adj_dn + (-macd_adj) + adx_strength + ma_adj_dn + tc_adj_dn + vd_adj_dn
         + obv_adj_dn + high52_adj_dn + rs_adj_dn
+        + analyst_adj_dn + target_adj_dn + insider_adj_dn
     )
 
     one_month_upside = (
@@ -545,6 +638,7 @@ def _build_mover_row_inner(ticker):
         + max(extension_factor, 0) * 0.45
         + rsi_adj_up + macd_adj + adx_strength + ma_adj_up + tc_adj_up + vd_adj_up
         + obv_adj_up + high52_adj_up + rs_adj_up
+        + analyst_adj_up + target_adj_up + insider_adj_up
     )
     one_month_downside = (
         (-trend_factor) * 1.1
@@ -553,6 +647,7 @@ def _build_mover_row_inner(ticker):
         + max(-extension_factor, 0) * 0.45
         + rsi_adj_dn + (-macd_adj) + adx_strength + ma_adj_dn + tc_adj_dn + vd_adj_dn
         + obv_adj_dn + high52_adj_dn + rs_adj_dn
+        + analyst_adj_dn + target_adj_dn + insider_adj_dn
     )
 
     direction_1w = "Grow Rapidly" if one_week_upside >= one_week_downside else "Fall Steeply"
@@ -578,6 +673,10 @@ def _build_mover_row_inner(ticker):
         "pct_from_52w_high": round(pct_from_52w_high, 2),
         "obv_slope_10d": round(obv_slope, 2),
         "hv_30d": round(hv_30d, 2),
+        "analyst_recom": round(fv_recom, 2) if fv_recom is not None else None,
+        "target_upside_pct": target_upside_pct,
+        "earnings_ts": fv_earnings_ts,
+        "insider_trans_pct": fv_insider,
     }
 
 
@@ -677,10 +776,12 @@ def build_price_forecast_table(tickers, top_n=10):
 
     df["forecast_confidence"] = (df["forecast_confidence"] * 100).round(1)
 
-    display_cols = [
+    base_display_cols = [
         "ticker", "close", "one_week_view", "est_1w_pct",
         "est_2w_pct", "forecast_confidence", "rsi_14", "adx_14", "volatility_5d", "volume_ratio_5",
     ]
+    optional_display_cols = ["analyst_recom", "target_upside_pct"]
+    display_cols = base_display_cols + [c for c in optional_display_cols if c in df.columns]
 
     gainers = (
         df[df["est_1w_pct"] > 0]
@@ -922,6 +1023,41 @@ def _build_strategy_recommendation(row):
     t1_pct = round(t1_mult * 100)
     t2_pct = round(t2_mult * 100)
 
+    # Analyst and earnings context from Finviz
+    fv_recom = row.get("analyst_recom")
+    fv_target_upside = row.get("target_upside_pct")
+    earnings_ts = row.get("earnings_ts")
+    contract_expiry_ts = pd.Timestamp(contract["expiration"]) if contract.get("expiration") else None
+
+    # Earnings proximity warning: flag if expiry is within 4 days of earnings
+    earnings_warning = ""
+    earnings_note = ""
+    if earnings_ts is not None and contract_expiry_ts is not None:
+        days_to_earnings = (earnings_ts - pd.Timestamp.now().normalize()).days
+        days_expiry_to_earnings = abs((contract_expiry_ts - earnings_ts).days)
+        if 0 <= days_to_earnings <= 14 and days_expiry_to_earnings <= 4:
+            earnings_warning = (
+                f" ⚠️ EARNINGS RISK: {ticker} reports on {earnings_ts.strftime('%b %d')} "
+                f"({days_to_earnings}d away) and the contract expires within {days_expiry_to_earnings}d of that. "
+                "IV will spike into earnings then collapse — options bought here will lose value fast after the event. "
+                "Consider closing before earnings or sizing down."
+            )
+        elif 0 <= days_to_earnings <= 21:
+            earnings_note = (
+                f" Earnings on {earnings_ts.strftime('%b %d')} ({days_to_earnings}d away) "
+                "may act as a catalyst — watch for IV expansion into the date."
+            )
+
+    # Analyst context line
+    analyst_line = ""
+    recom_labels = {1: "Strong Buy", 2: "Buy", 3: "Hold", 4: "Sell", 5: "Strong Sell"}
+    if fv_recom is not None:
+        recom_label = recom_labels.get(round(fv_recom), f"{fv_recom:.1f}")
+        analyst_line = f" Analyst consensus: {recom_label} ({fv_recom:.2f})."
+        if fv_target_upside is not None:
+            direction = "upside" if fv_target_upside > 0 else "downside"
+            analyst_line += f" Target price implies {abs(fv_target_upside):.1f}% {direction}."
+
     entry_rule = (
         f"Enter near open if {ticker} confirms direction. "
         f"Target entry around ${mid_price:.2f} mid-price."
@@ -930,6 +1066,7 @@ def _build_strategy_recommendation(row):
         entry_rule += f" RSI elevated ({rsi:.0f}) — wait for a small pullback before entering."
     elif rsi < 32:
         entry_rule += f" RSI oversold ({rsi:.0f}) — wait for stabilization before entering."
+    entry_rule += analyst_line + earnings_warning
 
     stop_rule = (
         f"Stop loss at ${stop_price:.2f} (−{stop_pct}% from entry, 1.5× ATR). "
@@ -946,6 +1083,7 @@ def _build_strategy_recommendation(row):
     daily_plan = (
         f"Bias {contract_side} on morning confirmation. "
         f"Risk ${stop_price:.2f}, first target ${target_1:.2f}, extended target ${target_2:.2f}."
+        + earnings_note
     )
 
     return {
@@ -965,6 +1103,8 @@ def _build_strategy_recommendation(row):
         "iv_hv_ratio": contract.get("iv_hv_ratio"),
         "rsi_14": round(rsi, 1),
         "adx_14": round(adx, 1),
+        "analyst_recom": row.get("analyst_recom"),
+        "target_upside_pct": row.get("target_upside_pct"),
         "strategy_score": round(float(row["strategy_score"]), 2),
         "strategy_confidence": round(_safe_float(row.get("strategy_confidence", 0.0), default=0.0) * 100, 1),
         "day_volume_share": round(float(row["percent_of_day_total"]), 2),

@@ -194,7 +194,7 @@ def format_strategy_table(df):
         "contract_quality_score", "strategy_score", "strategy_confidence", "day_volume_share",
         "underlying_5d_move",
     ]
-    optional_cols = ["rsi_14", "adx_14", "iv_hv_ratio"]
+    optional_cols = ["rsi_14", "adx_14", "iv_hv_ratio", "analyst_recom", "target_upside_pct"]
     text_cols = ["entry_rule", "stop_rule", "take_profit_rule", "midday_check", "daily_plan"]
 
     available = base_cols + [c for c in optional_cols if c in df.columns] + text_cols
@@ -221,6 +221,8 @@ def format_strategy_table(df):
         "rsi_14": "RSI (14)",
         "adx_14": "ADX (14)",
         "iv_hv_ratio": "IV/HV Ratio",
+        "analyst_recom": "Analyst (1-5)",
+        "target_upside_pct": "Target Upside %",
         "entry_rule": "Entry Rule",
         "stop_rule": "Stop Rule",
         "take_profit_rule": "Take Profit Rule",
@@ -721,6 +723,8 @@ with tab6:
         "adx_14": "ADX (14)",
         "volatility_5d": "5D Range %",
         "volume_ratio_5": "Vol Ratio",
+        "analyst_recom": "Analyst (1-5)",
+        "target_upside_pct": "Target Upside %",
     }
 
     if gainers_df is not None and not gainers_df.empty:
