@@ -80,10 +80,17 @@ def _get_intraday(ticker: str) -> pd.DataFrame:
 def _get_finviz(ticker: str) -> dict:
     if not _FINVIZ_AVAILABLE:
         return {}
-    try:
-        return _finviz_quote(ticker).ticker_fundament()
-    except Exception:
-        return {}
+    import time
+    for attempt in range(3):
+        try:
+            return _finviz_quote(ticker).ticker_fundament()
+        except Exception as e:
+            msg = str(e).lower()
+            if "rate" in msg or "too many" in msg or "429" in msg:
+                time.sleep(2 + attempt * 2)  # 2s, 4s, 6s
+                continue
+            return {}  # non-rate-limit error, give up immediately
+    return {}  # all retries exhausted — return empty, don't block analysis
 
 
 def _get_snapshot(ticker: str) -> dict:
@@ -431,7 +438,11 @@ def analyse_ticker(ticker: str) -> dict:
 
     snap = _get_snapshot(ticker)
     history = _get_price_history(ticker)
-    fv_raw = _get_finviz(ticker)
+
+    try:
+        fv_raw = _get_finviz(ticker)
+    except Exception:
+        fv_raw = {}
 
     tech = _technicals(history)
     fund = _fundamentals(fv_raw)
