@@ -27,6 +27,7 @@ from options_data import (
 )
 from options_flow import detect_unusual_flow
 from r2_storage import ensure_assets_available
+from short_squeeze import scan_short_squeeze
 
 
 ensure_assets_available()
@@ -254,18 +255,21 @@ for state_key, default_value in [
     ("forecast_gainers_df", None),
     ("forecast_losers_df", None),
     ("forecast_fetched_at", None),
+    ("squeeze_df", None),
+    ("squeeze_fetched_at", None),
 ]:
     if state_key not in st.session_state:
         st.session_state[state_key] = default_value
 
 
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "Market Options Screener",
     "Market Volume Leaders",
     "Rapid Movers",
     "Strategy Ideas",
     "Options Chain Explorer",
     "Price Forecast",
+    "Short Squeeze Scanner",
 ])
 
 
@@ -743,4 +747,135 @@ with tab6:
         "They are not a prediction model — treat as a directional watchlist, not a guarantee. "
         "Est. 1W = next ~5 trading days. Est. 2W = next ~10 trading days."
     )
+
+
+# =========================
+# SHORT SQUEEZE SCANNER
+# =========================
+
+with tab7:
+
+    col_run, col_info = st.columns([1, 4])
+    with col_run:
+        run_squeeze = st.button("Run Short Squeeze Scanner", use_container_width=True)
+    with col_info:
+        if st.session_state["squeeze_fetched_at"]:
+            st.caption(f"Last run: {st.session_state['squeeze_fetched_at']}")
+
+    col_sf, col_rows = st.columns(2)
+    with col_sf:
+        min_short_float = st.slider(
+            "Min Short Float %", min_value=5, max_value=25, value=8,
+            help="Only show stocks where shorts hold at least this % of the float",
+        )
+    with col_rows:
+        squeeze_rows = st.slider("Max Results", min_value=5, max_value=30, value=15)
+
+    st.caption(
+        "Scans the full market universe for large-cap stocks (>$5B market cap, price >$10) "
+        "with elevated short interest, rising momentum, and volume confirmation. "
+        "Uses free yfinance data — short interest figures update twice a month."
+    )
+
+    if run_squeeze:
+        st.session_state["squeeze_df"] = None
+        with st.spinner(f"Scanning {len(MARKET_SCAN_TICKERS)} tickers for squeeze setups…"):
+            try:
+                squeeze_df = scan_short_squeeze(
+                    MARKET_SCAN_TICKERS,
+                    min_short_float=min_short_float,
+                )
+                st.session_state["squeeze_df"] = squeeze_df
+                st.session_state["squeeze_fetched_at"] = _now()
+            except Exception as e:
+                st.error(f"Squeeze scan failed: {e}")
+
+    squeeze_df = st.session_state["squeeze_df"]
+
+    if squeeze_df is not None and not squeeze_df.empty:
+        display = squeeze_df.head(squeeze_rows).copy()
+
+        # Main metrics table
+        main_cols = {
+            "ticker": "Ticker",
+            "name": "Company",
+            "sector": "Sector",
+            "price": "Price",
+            "market_cap_b": "Mkt Cap ($B)",
+            "short_float_pct": "Short Float %",
+            "days_to_cover": "Days to Cover",
+            "volume_ratio": "Vol Ratio (5d/20d)",
+            "ret_3d": "3D Return %",
+            "ret_5d": "5D Return %",
+            "rsi": "RSI (14)",
+            "pct_above_ma20": "% vs 20MA",
+            "squeeze_score": "Squeeze Score",
+            "setup_quality": "Setup Tier",
+        }
+        available_main = {k: v for k, v in main_cols.items() if k in display.columns}
+        st.subheader("Ranked Short Squeeze Candidates")
+        st.dataframe(
+            display[list(available_main.keys())].rename(columns=available_main),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        # Score bar chart
+        fig = px.bar(
+            display,
+            x="ticker",
+            y="squeeze_score",
+            color="setup_quality",
+            text="squeeze_score",
+            title="Squeeze Score by Ticker",
+            labels={"ticker": "Ticker", "squeeze_score": "Squeeze Score", "setup_quality": "Tier"},
+        )
+        fig.update_traces(texttemplate="%{text:.0f}", textposition="outside")
+        fig.update_layout(yaxis_range=[0, 105], showlegend=True)
+        st.plotly_chart(fig, use_container_width=True)
+
+        # Detailed candidate cards
+        st.subheader("Why Each Ticker & When to Buy")
+        for _, row in display.iterrows():
+            tier_emoji = {"Tier 1": "🔴", "Tier 2": "🟠", "Tier 3": "🟡"}.get(
+                row["setup_quality"].split(" — ")[0].strip(), "⚪"
+            )
+            with st.expander(
+                f"{tier_emoji} {row['ticker']} — {row['setup_quality']}  |  "
+                f"Score: {row['squeeze_score']:.0f}  |  "
+                f"Short Float: {row['short_float_pct']:.1f}%  |  "
+                f"DTC: {row['days_to_cover']:.1f}d  |  "
+                f"Price: ${row['price']:.2f}"
+            ):
+                col_a, col_b, col_c = st.columns(3)
+                col_a.metric("Short Float %", f"{row['short_float_pct']:.1f}%")
+                col_b.metric("Days to Cover", f"{row['days_to_cover']:.1f}d")
+                col_c.metric("Volume Ratio", f"{row['volume_ratio']:.2f}x")
+
+                col_d, col_e, col_f = st.columns(3)
+                col_d.metric("3D Return", f"{row['ret_3d']:+.1f}%")
+                col_e.metric("RSI (14)", f"{row['rsi']:.0f}")
+                col_f.metric("vs 20-day MA", f"{row['pct_above_ma20']:+.1f}%")
+
+                st.markdown("**Why this ticker is a squeeze candidate:**")
+                for reason in row["reasons"].split(" | "):
+                    st.markdown(f"- {reason}")
+
+                st.markdown("**Best time to buy:**")
+                st.info(row["buy_timing"])
+
+                if row.get("next_earnings") and row["next_earnings"] not in ("None", "nan", ""):
+                    st.markdown(f"**Next earnings:** {row['next_earnings']}  _(catalyst window)_")
+
+        st.caption(
+            "Squeeze Score = weighted composite of short float %, days-to-cover, "
+            "3d/5d momentum, volume ratio, and MA position. "
+            "Short interest data from yfinance updates twice per month (FINRA settlement). "
+            "Always confirm with a real-time source (Finviz, Ortex) before trading."
+        )
+
+    elif squeeze_df is not None:
+        st.warning(f"No tickers met the minimum short float threshold of {min_short_float}%. Try lowering the filter.")
+    else:
+        st.info("Click **Run Short Squeeze Scanner** to find squeeze candidates.")
 
