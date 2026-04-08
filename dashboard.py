@@ -29,6 +29,7 @@ from options_flow import detect_unusual_flow
 from r2_storage import ensure_assets_available
 from short_squeeze import scan_short_squeeze
 from timing_engine import get_intraday_timing_batch, _SLOT_LABELS as TIMING_SLOT_LABELS
+from ticker_analysis import analyse_ticker
 
 
 ensure_assets_available()
@@ -262,12 +263,15 @@ for state_key, default_value in [
     ("squeeze_fetched_at", None),
     ("timing_results", None),
     ("timing_fetched_at", None),
+    ("analysis_result", None),
+    ("analysis_ticker", None),
+    ("analysis_fetched_at", None),
 ]:
     if state_key not in st.session_state:
         st.session_state[state_key] = default_value
 
 
-tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
     "Market Options Screener",
     "Market Volume Leaders",
     "Rapid Movers",
@@ -276,6 +280,7 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
     "Price Forecast",
     "Short Squeeze Scanner",
     "Intraday Timing",
+    "Ticker Analysis",
 ])
 
 
@@ -1060,4 +1065,197 @@ with tab8:
 
     else:
         st.info("Enter tickers (or leave blank for market universe) and click **Run Intraday Timing**.")
+
+
+# =========================
+# TICKER ANALYSIS
+# =========================
+
+with tab9:
+
+    st.markdown(
+        "Complete single-ticker deep dive — fetches fresh data from Polygon and Finviz and "
+        "produces a full technical, fundamental, timing, and strategy analysis."
+    )
+
+    col_ticker, col_run = st.columns([2, 1])
+    with col_ticker:
+        analysis_input = st.text_input("Ticker Symbol", value="", placeholder="e.g. NVDA").upper().strip()
+    with col_run:
+        st.write("")
+        run_analysis = st.button("Run Full Analysis", use_container_width=True)
+
+    if run_analysis and analysis_input:
+        st.session_state["analysis_result"] = None
+        st.session_state["analysis_ticker"] = analysis_input
+        with st.spinner(f"Running full analysis on {analysis_input}…"):
+            try:
+                result = analyse_ticker(analysis_input)
+                st.session_state["analysis_result"] = result
+                st.session_state["analysis_fetched_at"] = _now()
+            except Exception as e:
+                st.error(f"Analysis failed: {e}")
+
+    result = st.session_state["analysis_result"]
+
+    if result:
+        ticker = result["ticker"]
+        snap = result["snapshot"]
+        tech = result["technicals"]
+        fund = result["fundamentals"]
+        signal = result["signal"]
+        timing = result["timing"]
+
+        st.caption(f"Last run: {st.session_state['analysis_fetched_at']}")
+
+        # ── Header ──────────────────────────────────────────────────────────
+        price = snap.get("price") or tech.get("price", 0)
+        change = snap.get("change_pct") or 0
+        company = fund.get("company", ticker)
+        sector = fund.get("sector", "")
+
+        st.subheader(f"{ticker} — {company}")
+        st.caption(f"{sector} · {fund.get('industry', '')}")
+
+        col_p, col_c, col_d, col_sig = st.columns(4)
+        col_p.metric("Price", f"${price:.2f}")
+        col_c.metric("Today", f"{change:+.2f}%")
+        col_d.metric("Direction", signal["direction"])
+        col_sig.metric("Confidence", f"{signal['confidence']}%")
+
+        # ── Summary ─────────────────────────────────────────────────────────
+        direction_color = (
+            "green" if "Bullish" in signal["direction"] else
+            "red" if "Bearish" in signal["direction"] else "gray"
+        )
+        st.markdown(f"### Overall Signal: :{direction_color}[{signal['direction']}]")
+        st.info(signal["trade_idea"])
+
+        # ── Signals breakdown ───────────────────────────────────────────────
+        col_bull, col_bear = st.columns(2)
+        with col_bull:
+            st.markdown("**Bullish signals**")
+            for r in signal["bullish_reasons"]:
+                st.markdown(f"- {r}")
+        with col_bear:
+            st.markdown("**Bearish signals**")
+            for r in signal["bearish_reasons"]:
+                st.markdown(f"- {r}")
+
+        st.divider()
+
+        # ── Technicals ──────────────────────────────────────────────────────
+        with st.expander("Technical Analysis", expanded=True):
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("RSI (14)", f"{tech.get('rsi', 0):.1f}", tech.get("rsi_signal", ""))
+            c2.metric("ADX (14)", f"{tech.get('adx', 0):.1f}", tech.get("adx_signal", ""))
+            c3.metric("MACD", f"{tech.get('macd_hist', 0):+.3f}", tech.get("macd_signal", ""))
+            c4.metric("Vol Ratio 5d", f"{tech.get('vol_ratio_5d', 0):.2f}x")
+
+            c5, c6, c7, c8 = st.columns(4)
+            c5.metric("5D Return", f"{tech.get('ret_5d', 0):+.2f}%")
+            c6.metric("1M Return", f"{tech.get('ret_1mo', 0):+.2f}%")
+            c7.metric("ATR (14)", f"${tech.get('atr', 0):.2f}")
+            c8.metric("Trend", tech.get("trend", "—"))
+
+            c9, c10, c11, c12 = st.columns(4)
+            c9.metric("MA 20", f"${tech.get('ma20', 0):.2f}")
+            c10.metric("MA 50", f"${tech.get('ma50', 0):.2f}" if tech.get("ma50") else "—")
+            c11.metric("MA 200", f"${tech.get('ma200', 0):.2f}" if tech.get("ma200") else "—")
+            c12.metric("vs 52W High", f"{tech.get('pct_from_high', 0):+.1f}%")
+
+            c13, c14 = st.columns(2)
+            c13.metric("Support (30d low)", f"${tech.get('support', 0):.2f}")
+            c14.metric("Resistance (30d high)", f"${tech.get('resistance', 0):.2f}")
+
+            # Price chart
+            hist = result.get("history")
+            if hist is not None and not hist.empty:
+                close_col = "Close"
+                if isinstance(hist.columns, pd.MultiIndex):
+                    hist = hist.copy()
+                    hist.columns = hist.columns.get_level_values(0)
+                chart_df = hist[[close_col]].tail(120).copy()
+                chart_df.index = pd.to_datetime(chart_df.index)
+                chart_df.columns = ["Price"]
+                # Add MAs
+                chart_df["MA20"] = chart_df["Price"].rolling(20).mean()
+                chart_df["MA50"] = chart_df["Price"].rolling(50).mean()
+                fig_price = px.line(
+                    chart_df, title=f"{ticker} — Last 120 Days",
+                    labels={"value": "Price", "index": "Date"},
+                )
+                fig_price.update_layout(height=350, legend_title="")
+                st.plotly_chart(fig_price, use_container_width=True)
+
+        # ── Fundamentals ────────────────────────────────────────────────────
+        with st.expander("Fundamentals & Analyst Data"):
+            f1, f2, f3, f4 = st.columns(4)
+            f1.metric("Market Cap", fund.get("market_cap", "—"))
+            f2.metric("P/E (TTM)", f"{fund.get('pe') or '—'}")
+            f3.metric("Forward P/E", f"{fund.get('forward_pe') or '—'}")
+            f4.metric("EPS (TTM)", f"${fund.get('eps_ttm') or '—'}")
+
+            f5, f6, f7, f8 = st.columns(4)
+            f5.metric("EPS Growth Next Y", f"{fund.get('eps_next_y') or '—'}%")
+            f6.metric("Revenue Growth Y/Y", f"{fund.get('revenue_growth') or '—'}%")
+            f7.metric("Profit Margin", f"{fund.get('profit_margin') or '—'}%")
+            f8.metric("ROE", f"{fund.get('roe') or '—'}%")
+
+            f9, f10, f11, f12 = st.columns(4)
+            f9.metric("Beta", f"{fund.get('beta') or '—'}")
+            f10.metric("Debt/Equity", f"{fund.get('debt_eq') or '—'}")
+            f11.metric("Inst. Ownership", f"{fund.get('inst_own') or '—'}%")
+            f12.metric("Insider Trans", f"{fund.get('insider_trans') or '—'}%")
+
+            fa, fb, fc, fd = st.columns(4)
+            fa.metric("Analyst", fund.get("analyst_recom_str", "—"))
+            fb.metric("Price Target", f"${fund.get('target_price') or '—'}")
+            fc.metric("Target Upside", f"{fund.get('target_upside_pct') or '—'}%")
+            fd.metric("Earnings Date", fund.get("earnings_date", "—"))
+
+            fe, ff = st.columns(2)
+            fe.metric("Short Float %", f"{fund.get('short_float_pct') or '—'}%")
+            ff.metric("Short Ratio", f"{fund.get('short_ratio') or '—'}")
+
+        # ── Intraday Timing ─────────────────────────────────────────────────
+        with st.expander("Intraday Timing"):
+            if timing.get("error"):
+                st.warning(f"Timing unavailable: {timing['error']}")
+            else:
+                tc1, tc2, tc3 = st.columns(3)
+                tc1.metric("Best Entry", timing.get("best_entry_window", "—"))
+                tc2.metric("Best Exit", timing.get("best_exit_window", "—"))
+                tc3.metric("Gap Fade Prob", f"{timing.get('gap_fade_prob') or '—'}%")
+                st.info(timing.get("timing_note", ""))
+
+                if timing.get("slot_labels") and timing.get("avg_return_by_slot"):
+                    slot_df = pd.DataFrame({
+                        "Time Slot": timing["slot_labels"],
+                        "Avg Return %": timing["avg_return_by_slot"],
+                        "Win Rate %": timing["win_rate_by_slot"],
+                        "Vol vs Avg": timing["volume_profile"],
+                    })
+                    entry_label = timing["best_entry_window"]
+                    exit_label = timing["best_exit_window"]
+
+                    def _hl(row):
+                        if row["Time Slot"] == entry_label:
+                            return ["background-color: #1a472a; color: white"] * len(row)
+                        if row["Time Slot"] == exit_label:
+                            return ["background-color: #1a3a5c; color: white"] * len(row)
+                        return [""] * len(row)
+
+                    st.dataframe(
+                        slot_df.style.apply(_hl, axis=1),
+                        use_container_width=True, hide_index=True,
+                    )
+
+        st.caption(
+            f"Data sources: Polygon.io (price, bars) · Finviz (fundamentals, analyst) · "
+            f"yfinance (options). Analysis as of {st.session_state['analysis_fetched_at']}."
+        )
+
+    else:
+        st.info("Enter a ticker symbol above and click **Run Full Analysis**.")
 
