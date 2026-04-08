@@ -11,10 +11,28 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 
+try:
+    from finvizfinance.quote import finvizfinance as _finviz_quote
+    _FINVIZ_AVAILABLE = True
+except Exception:
+    _FINVIZ_AVAILABLE = False
+
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _finviz_short_float(ticker: str) -> float | None:
+    """Scrape short float % from Finviz. Returns None on any failure."""
+    if not _FINVIZ_AVAILABLE:
+        return None
+    try:
+        data = _finviz_quote(ticker).ticker_fundament()
+        raw = data.get("Short Float", "").replace("%", "").strip()
+        return float(raw) if raw else None
+    except Exception:
+        return None
+
 
 def _safe(value, default=None):
     try:
@@ -41,7 +59,10 @@ def _fetch_ticker_data(ticker: str) -> dict | None:
         shares_short = _safe(info.get("sharesShort"), 0)
         float_shares = _safe(info.get("floatShares"), 1) or 1
 
-        # shortPercentOfFloat is frequently missing; fall back to sharesShort/floatShares
+        # shortPercentOfFloat fallback chain:
+        # 1) yfinance shortPercentOfFloat field
+        # 2) compute from sharesShort / floatShares (yfinance)
+        # 3) scrape from Finviz (most reliable, updates twice a month)
         raw_spf = _safe(info.get("shortPercentOfFloat"), None)
         if raw_spf is not None:
             # yfinance returns as decimal (0.052) or occasionally as percent (5.2)
@@ -49,7 +70,7 @@ def _fetch_ticker_data(ticker: str) -> dict | None:
         elif shares_short and float_shares:
             short_float_pct = (shares_short / float_shares) * 100
         else:
-            short_float_pct = 0.0
+            short_float_pct = _finviz_short_float(ticker) or 0.0
 
         # Price history for momentum / volume
         hist = yf.download(ticker, period="3mo", interval="1d",
