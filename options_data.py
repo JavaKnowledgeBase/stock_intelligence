@@ -1187,27 +1187,29 @@ def build_strategy_table(tickers, top_n=10):
         "expiration_errors": 0,
     }
 
-    if movers_df.empty or volume_df.empty:
-        missing_sources = []
-        if movers_df.empty:
-            missing_sources.append("rapid movers")
-        if volume_df.empty:
-            missing_sources.append("market volume")
-
+    # Movers are required; volume is optional (options chain fetches fail often during market hours)
+    if movers_df.empty:
         diagnostics["status"] = "data_unavailable"
-        if diagnostics["rate_limited"]:
-            diagnostics["message"] = (
-                "Yahoo rate limited the latest strategy scan; "
-                f"missing {', '.join(missing_sources)} data "
-                f"(movers rows: {diagnostics['movers_found']}, volume rows: {diagnostics['volume_rows_found']})."
-            )
-        else:
-            diagnostics["message"] = (
-                "Latest Yahoo-backed scan was incomplete: "
-                f"missing {', '.join(missing_sources)} data "
-                f"(movers rows: {diagnostics['movers_found']}, volume rows: {diagnostics['volume_rows_found']})."
-            )
+        diagnostics["message"] = (
+            "No rapid mover data was returned. "
+            f"(movers rows: {diagnostics['movers_found']}, volume rows: {diagnostics['volume_rows_found']})."
+        )
         return pd.DataFrame(), diagnostics
+
+    if volume_df.empty:
+        diagnostics["message"] = (
+            "Options volume data unavailable — running on price/momentum signals only. "
+            "Volume columns will show 0. Strategy scores are still valid."
+        )
+        # Build a zero-filled volume stub so the merge works cleanly
+        volume_df = pd.DataFrame({
+            "ticker": movers_df["ticker"],
+            "dominant_side": "unknown",
+            "one_day_volume": 0.0,
+            "percent_of_day_total": 0.0,
+            "call_volume": 0.0,
+            "put_volume": 0.0,
+        })
 
     combined = movers_df.merge(
         volume_df[
