@@ -453,14 +453,20 @@ def analyse_ticker(ticker: str) -> dict:
     signal = _build_signal(tech, fund, snap)
 
     # Plain-English summary
-    price = snap.get("price") or tech.get("price", 0)
+    price = snap.get("price") or tech.get("price") or 0
     change = snap.get("change_pct") or 0
+    price = float(price) if price else 0.0
+    change = float(change) if change else 0.0
+    rsi_val = tech.get("rsi")
+    adx_val = tech.get("adx")
+    rsi_str = f"{rsi_val:.0f}" if isinstance(rsi_val, (int, float)) else "—"
+    adx_str = f"{adx_val:.0f}" if isinstance(adx_val, (int, float)) else "—"
     summary_lines = [
         f"**{ticker}** — {fund.get('company', ticker)} ({fund.get('sector', '')})",
         f"Current price: **${price:.2f}** ({change:+.2f}% today)",
         f"Overall signal: **{signal['direction']}** | Confidence: **{signal['confidence']}%**",
         "",
-        f"Trend: {tech.get('trend', '—')} | RSI: {tech.get('rsi', '—'):.0f} | ADX: {tech.get('adx', '—'):.0f}",
+        f"Trend: {tech.get('trend', '—')} | RSI: {rsi_str} | ADX: {adx_str}",
         f"Analyst: {fund.get('analyst_recom_str', '—')} | Target: ${fund.get('target_price') or '—'} ({_pct(fund.get('target_upside_pct'))} upside)",
         f"Earnings: {fund.get('earnings_date', '—')} | Short Float: {fund.get('short_float_pct') or '—'}%",
         "",
