@@ -1,36 +1,26 @@
 [server]
-# Headless mode — no browser auto-launch; required for production
 headless = true
 port = 8501
-# Allow larger DataFrames and chart data
 maxUploadSize = 50
 maxMessageSize = 200
-# Disable file-watcher in production to save CPU
 runOnSave = false
-# Enable XSRF protection
 enableXsrfProtection = true
 enableCORS = false
 
 [browser]
-# Do not send usage statistics
 gatherUsageStats = false
 
 [runner]
-# Fast reruns avoid full re-execution on widget interactions
 fastReruns = true
-# Disable magic (auto-st.write) to avoid accidental output
 magicEnabled = false
-# Workers: Streamlit 1.35+ supports multiple worker threads per process.
-# For 200 concurrent users, run 4 processes behind a load balancer (nginx)
-# each on ports 8501–8504 and set this to 2 per process.
-# See DEPLOY.md for the nginx config.
 
 [theme]
 base = "dark"
-primaryColor = "#00d4aa"
-backgroundColor = "#0e1117"
-secondaryBackgroundColor = "#1a1f2e"
-textColor = "#fafafa"
+primaryColor      = "#58a6ff"
+backgroundColor   = "#0d1117"
+secondaryBackgroundColor = "#161b22"
+textColor         = "#c9d1d9"
+font              = "sans serif"
 
 [logger]
 level = "warning"
