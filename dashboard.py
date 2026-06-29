@@ -395,17 +395,17 @@ with st.sidebar:
 
 
 tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12 = st.tabs([
-    "Market Options Screener",
-    "Market Volume Leaders",
+    "Options Screener",
+    "Volume Leaders",
     "Rapid Movers",
     "Strategy Ideas",
-    "Options Chain Explorer",
+    "Chain Explorer",
     "Price Forecast",
-    "Short Squeeze Scanner",
-    "Intraday Timing",
+    "Short Squeeze",
+    "Intraday",
     "Ticker Analysis",
-    "Earnings Calendar",
-    "Market Screener",
+    "Earnings",
+    "Screener",
     "Insider Flow",
 ])
 
