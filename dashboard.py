@@ -17,7 +17,6 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from config import MARKET_SCAN_TICKERS, TICKERS
-from gex_engine import calculate_gex
 from options_data import (
     build_market_movers_table,
     build_price_forecast_table,
@@ -38,6 +37,13 @@ from screener_engine import SCREENER_PRESETS, FILTER_COLUMNS, run_screener
 from insider_flow import get_insider_flow
 from news_sentiment import get_news_sentiment, aggregate_sentiment
 from top_movers import get_top_movers
+from unusual_flow_scanner import scan_unusual_flow, format_flow_table
+from gex_engine import calculate_gex, calculate_gex_enhanced, get_gex_for_ticker
+from congress_tracker import (
+    get_congress_trades,
+    get_top_congress_tickers,
+    get_most_active_politicians,
+)
 import ai_assistant as ai
 
 
@@ -302,6 +308,14 @@ for state_key, default_value in [
     ("movers_gainers_df", None),
     ("movers_losers_df", None),
     ("movers_fetched_at", None),
+    ("unusual_flow_df", None),
+    ("unusual_flow_fetched_at", None),
+    ("gex_ticker", ""),
+    ("gex_data", None),
+    ("gex_spot", 0.0),
+    ("gex_fetched_at", None),
+    ("congress_df", None),
+    ("congress_fetched_at", None),
     ("chat_history", []),
     ("chat_portfolio", ""),
     ("chat_model", ai.DEFAULT_MODEL),
@@ -1255,7 +1269,7 @@ elif st.session_state["trader_mode"] == "stocks":
 
 elif st.session_state["trader_mode"] == "options":
 
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12 = st.tabs([
         "Options\nScreener",
         "Volume\nLeaders",
         "Rapid\nMovers",
@@ -1265,6 +1279,9 @@ elif st.session_state["trader_mode"] == "options":
         "Short\nSqueeze",
         "Intraday\nTiming",
         "Ticker\nAnalysis",
+        "Unusual\nFlow",
+        "GEX\nHeatmap",
+        "Congress\nTrades",
     ])
 
     # =========================
@@ -2107,3 +2124,308 @@ elif st.session_state["trader_mode"] == "options":
 
     with tab9:
         _render_ticker_analysis()
+
+
+    # =========================
+    # UNUSUAL OPTIONS FLOW
+    # =========================
+
+    with tab10:
+        st.markdown(
+            "Scans the options universe for **unusual flow signals**: "
+            "volume spikes vs open interest (new money), large notional prints, "
+            "and OTM directional sweeps. Sorted by premium descending."
+        )
+
+        col_run, col_info = st.columns([1, 4])
+        with col_run:
+            run_flow = st.button("Scan Unusual Flow", use_container_width=True)
+        with col_info:
+            if st.session_state["unusual_flow_fetched_at"]:
+                st.caption(f"Last run: {st.session_state['unusual_flow_fetched_at']}")
+
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            flow_min_volume = st.number_input("Min Volume", min_value=0, value=300, step=100)
+        with col2:
+            flow_min_ratio = st.number_input("Min Vol/OI Ratio", min_value=0.0, value=2.0, step=0.5)
+        with col3:
+            flow_min_premium = st.number_input(
+                "Min Premium $", min_value=0, value=25000, step=5000, format="%d"
+            )
+        with col4:
+            flow_type_filter = st.selectbox(
+                "Show Only", ["All", "🔥 Sweep", "💰 Big Print", "📦 Block", "📈 Unusual"]
+            )
+
+        if run_flow:
+            with st.spinner(f"Scanning {len(TICKERS)} tickers for unusual flow…"):
+                raw_flow = scan_unusual_flow(
+                    TICKERS,
+                    min_volume=int(flow_min_volume),
+                    min_vol_oi_ratio=float(flow_min_ratio),
+                    min_premium=int(flow_min_premium),
+                )
+            st.session_state["unusual_flow_df"] = raw_flow
+            st.session_state["unusual_flow_fetched_at"] = _now()
+
+        flow_df = st.session_state["unusual_flow_df"]
+        if flow_df is not None and not flow_df.empty:
+            display_flow = flow_df.copy()
+            if flow_type_filter != "All":
+                display_flow = display_flow[display_flow["flow_type"] == flow_type_filter]
+
+            st.caption(
+                f"Showing {len(display_flow)} signals "
+                f"({flow_df['ticker'].nunique()} tickers scanned)"
+            )
+
+            display_flow = format_flow_table(display_flow)
+            display_flow["Premium $"] = display_flow["Premium $"].apply(
+                lambda v: f"${v:,.0f}"
+            )
+
+            def _color_flow(row):
+                if row.get("C/P") == "call":
+                    return ["background-color: #0e2a1a"] * len(row)
+                elif row.get("C/P") == "put":
+                    return ["background-color: #2a0e0e"] * len(row)
+                return [""] * len(row)
+
+            st.dataframe(
+                display_flow.style.apply(_color_flow, axis=1),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            # Summary bar: calls vs puts by premium
+            if "C/P" in display_flow.columns and "Premium $" in display_flow.columns:
+                import re as _re
+                display_flow["_premium_num"] = display_flow["Premium $"].apply(
+                    lambda s: int(_re.sub(r"[^\d]", "", str(s))) if s else 0
+                )
+                side_summary = display_flow.groupby("C/P")["_premium_num"].sum().reset_index()
+                side_summary.columns = ["Side", "Total Premium"]
+                if not side_summary.empty:
+                    fig_side = px.bar(
+                        side_summary, x="Side", y="Total Premium", color="Side",
+                        color_discrete_map={"call": "#00cc44", "put": "#ff4444"},
+                        title="Call vs Put Premium ($)",
+                    )
+                    fig_side.update_layout(
+                        height=300, showlegend=False,
+                        margin=dict(t=40, b=20),
+                        yaxis_tickformat="$,.0f",
+                    )
+                    st.plotly_chart(fig_side, use_container_width=True)
+        else:
+            st.info("Click **Scan Unusual Flow** to detect unusual options activity.")
+
+
+    # =========================
+    # GEX HEATMAP
+    # =========================
+
+    with tab11:
+        st.markdown(
+            "**Gamma Exposure (GEX) Heatmap** — shows where market makers (dealers) are "
+            "concentrated by strike. Positive GEX = dealers are long gamma (stabilising). "
+            "Negative GEX = dealers are short gamma (amplifying moves)."
+        )
+
+        col_ticker_gex, col_exp_gex, col_run_gex = st.columns([2, 2, 1])
+        with col_ticker_gex:
+            gex_ticker_input = st.selectbox("Ticker", TICKERS, key="gex_ticker_select")
+        with col_exp_gex:
+            with st.spinner("Loading expirations..."):
+                gex_exps = get_expirations_cached(gex_ticker_input)
+            gex_exp_options = ["All (first 2)"] + (gex_exps or [])
+            gex_selected_exp = st.selectbox("Expiration", gex_exp_options, key="gex_exp_select")
+        with col_run_gex:
+            st.write("")
+            run_gex = st.button("Run GEX", use_container_width=True)
+
+        if run_gex:
+            exp_arg = None if gex_selected_exp == "All (first 2)" else gex_selected_exp
+            with st.spinner(f"Fetching GEX for {gex_ticker_input}…"):
+                spot, gex_data = get_gex_for_ticker(gex_ticker_input, expiration=exp_arg)
+            st.session_state["gex_data"] = gex_data
+            st.session_state["gex_spot"] = spot
+            st.session_state["gex_ticker"] = gex_ticker_input
+            st.session_state["gex_fetched_at"] = _now()
+
+        if st.session_state["gex_fetched_at"]:
+            st.caption(
+                f"Last run: {st.session_state['gex_fetched_at']} "
+                f"| Ticker: {st.session_state['gex_ticker']} "
+                f"| Spot: ${st.session_state['gex_spot']:.2f}"
+            )
+
+        gex_data = st.session_state["gex_data"]
+        gex_spot = st.session_state["gex_spot"]
+
+        if gex_data and "gex_by_strike" in gex_data:
+            gex_series = gex_data["gex_by_strike"]
+            net_gex = gex_data.get("net_gex", 0)
+            call_wall = gex_data.get("call_wall")
+            put_wall = gex_data.get("put_wall")
+            gamma_flip = gex_data.get("gamma_flip")
+            dealer_bias = gex_data.get("dealer_bias", "")
+
+            # Key level metrics
+            m1, m2, m3, m4, m5 = st.columns(5)
+            m1.metric("Net GEX", f"${net_gex/1e6:.1f}M" if abs(net_gex) > 1e6 else f"${net_gex:,.0f}")
+            m2.metric("Call Wall (resistance)", f"${call_wall:.0f}" if call_wall else "—")
+            m3.metric("Put Wall (support)", f"${put_wall:.0f}" if put_wall else "—")
+            m4.metric("Gamma Flip", f"${gamma_flip:.0f}" if gamma_flip else "—")
+            m5.metric("Dealer Bias", "Long Gamma" if net_gex >= 0 else "Short Gamma")
+
+            st.caption(f"**Bias:** {dealer_bias}")
+
+            # Heatmap bar chart
+            gex_df = gex_series.reset_index()
+            gex_df.columns = ["Strike", "GEX"]
+            gex_df["Color"] = gex_df["GEX"].apply(lambda v: "Positive" if v >= 0 else "Negative")
+
+            fig_gex = go.Figure()
+            fig_gex.add_trace(go.Bar(
+                x=gex_df["Strike"],
+                y=gex_df["GEX"],
+                marker_color=gex_df["GEX"].apply(lambda v: "#00cc44" if v >= 0 else "#ff4444"),
+                name="GEX",
+            ))
+
+            # Overlay key levels as vertical lines
+            if gex_spot:
+                fig_gex.add_vline(
+                    x=gex_spot, line_dash="solid", line_color="white",
+                    annotation_text=f"Spot ${gex_spot:.0f}", annotation_position="top left"
+                )
+            if call_wall:
+                fig_gex.add_vline(
+                    x=call_wall, line_dash="dash", line_color="#00cc44",
+                    annotation_text="Call Wall", annotation_position="top right"
+                )
+            if put_wall:
+                fig_gex.add_vline(
+                    x=put_wall, line_dash="dash", line_color="#ff4444",
+                    annotation_text="Put Wall", annotation_position="bottom left"
+                )
+            if gamma_flip:
+                fig_gex.add_vline(
+                    x=gamma_flip, line_dash="dot", line_color="yellow",
+                    annotation_text="Gamma Flip", annotation_position="top left"
+                )
+
+            fig_gex.update_layout(
+                title=f"{st.session_state['gex_ticker']} — Dealer Gamma Exposure by Strike",
+                xaxis_title="Strike",
+                yaxis_title="Net GEX ($)",
+                height=500,
+                margin=dict(t=60, b=40),
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0.05)",
+                xaxis=dict(gridcolor="rgba(255,255,255,0.1)"),
+                yaxis=dict(gridcolor="rgba(255,255,255,0.1)", tickformat="$,.0f"),
+            )
+            st.plotly_chart(fig_gex, use_container_width=True)
+
+            st.subheader("Strike-level GEX Table")
+            gex_display = gex_df.copy()
+            gex_display["GEX"] = gex_display["GEX"].apply(lambda v: f"${v:,.0f}")
+            st.dataframe(gex_display[["Strike", "GEX"]], use_container_width=True, hide_index=True)
+        else:
+            st.info("Select a ticker and click **Run GEX** to generate the heatmap.")
+
+
+    # =========================
+    # CONGRESS TRADES
+    # =========================
+
+    with tab12:
+        st.markdown(
+            "**Congressional Trade Tracker** — real-time disclosures of stock purchases and sales "
+            "by U.S. senators and representatives (STOCK Act filings). "
+            "Powered by [Quiver Quantitative](https://www.quiverquant.com/) free API."
+        )
+
+        if not os.getenv("QUIVER_API_KEY", "").strip():
+            st.warning(
+                "**QUIVER_API_KEY not set.** "
+                "Sign up free at [quiverquant.com](https://www.quiverquant.com/) → "
+                "add `QUIVER_API_KEY = \"your_key\"` to Streamlit Cloud secrets."
+            )
+        else:
+            col_run_c, col_info_c = st.columns([1, 4])
+            with col_run_c:
+                run_congress = st.button("Load Congress Trades", use_container_width=True)
+            with col_info_c:
+                if st.session_state["congress_fetched_at"]:
+                    st.caption(f"Last run: {st.session_state['congress_fetched_at']}")
+
+            col_days, col_ticker_c = st.columns(2)
+            with col_days:
+                congress_days = st.slider("Days back", min_value=7, max_value=180, value=60)
+            with col_ticker_c:
+                congress_ticker_filter = st.text_input(
+                    "Filter by Ticker (optional)", placeholder="e.g. NVDA"
+                ).upper().strip()
+
+            if run_congress:
+                ticker_arg = congress_ticker_filter or None
+                with st.spinner("Fetching congressional disclosures…"):
+                    congress_df = get_congress_trades(
+                        days_back=congress_days,
+                        ticker=ticker_arg,
+                    )
+                st.session_state["congress_df"] = congress_df
+                st.session_state["congress_fetched_at"] = _now()
+
+            congress_df = st.session_state["congress_df"]
+            if congress_df is not None and not congress_df.empty:
+                st.caption(
+                    f"{len(congress_df)} filings · "
+                    f"{congress_df['ticker'].nunique()} tickers · "
+                    f"{congress_df['politician'].nunique()} politicians"
+                )
+
+                ctab1, ctab2, ctab3 = st.tabs(["All Trades", "Top Tickers", "Most Active"])
+
+                with ctab1:
+                    show_cols = [
+                        "trade_date", "filed_date", "politician", "party",
+                        "chamber", "ticker", "transaction", "amount",
+                    ]
+                    available = [c for c in show_cols if c in congress_df.columns]
+                    disp = congress_df[available].copy()
+                    disp.columns = [c.replace("_", " ").title() for c in disp.columns]
+                    st.dataframe(disp, use_container_width=True, hide_index=True)
+
+                with ctab2:
+                    top_tickers_df = get_top_congress_tickers(congress_df)
+                    if not top_tickers_df.empty:
+                        st.dataframe(top_tickers_df, use_container_width=True, hide_index=True)
+
+                        fig_ct = px.bar(
+                            top_tickers_df.head(15),
+                            x="ticker", y="trades",
+                            color="sentiment",
+                            color_discrete_map={
+                                "🟢 Bullish": "#00cc44",
+                                "🔴 Bearish": "#ff4444",
+                                "⚪ Mixed": "#aaaaaa",
+                            },
+                            title="Most Traded Tickers by Congress",
+                        )
+                        fig_ct.update_layout(height=350, margin=dict(t=40, b=20), showlegend=True)
+                        st.plotly_chart(fig_ct, use_container_width=True)
+
+                with ctab3:
+                    politicians_df = get_most_active_politicians(congress_df)
+                    if not politicians_df.empty:
+                        st.dataframe(politicians_df, use_container_width=True, hide_index=True)
+
+            elif congress_df is not None and congress_df.empty:
+                st.info("No disclosures found for the selected period. Try increasing 'Days back'.")
+            else:
+                st.info("Click **Load Congress Trades** to fetch recent congressional disclosures.")
