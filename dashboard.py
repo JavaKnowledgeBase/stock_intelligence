@@ -43,6 +43,21 @@ ensure_assets_available()
 
 st.set_page_config(layout="wide")
 
+st.markdown("""
+<style>
+/* Allow tab labels to wrap onto two lines */
+.stTabs [data-baseweb="tab"] {
+    white-space: pre-wrap !important;
+    text-align: center !important;
+    height: auto !important;
+    padding-top: 8px !important;
+    padding-bottom: 8px !important;
+    line-height: 1.3 !important;
+    min-width: 70px !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
 
 @st.cache_data(show_spinner=False)
 def get_build_label():
@@ -395,18 +410,18 @@ with st.sidebar:
 
 
 tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12 = st.tabs([
-    "Options",
-    "Volume",
-    "Movers",
-    "Strategy",
-    "Chain",
-    "Forecast",
-    "Squeeze",
-    "Intraday",
-    "Ticker",
-    "Earnings",
-    "Screener",
-    "Insider",
+    "Options\nScreener",
+    "Volume\nLeaders",
+    "Rapid\nMovers",
+    "Strategy\nIdeas",
+    "Chain\nExplorer",
+    "Price\nForecast",
+    "Short\nSqueeze",
+    "Intraday\nTiming",
+    "Ticker\nAnalysis",
+    "Earnings\nCalendar",
+    "Market\nScreener",
+    "Insider\nFlow",
 ])
 
 
