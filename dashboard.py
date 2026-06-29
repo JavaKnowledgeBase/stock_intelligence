@@ -58,6 +58,13 @@ from macro_dashboard import (
     FRED_SERIES,
 )
 from earnings_analyzer import analyse_earnings
+from ai_thesis import generate_thesis
+from sector_rotation import get_sector_rotation, get_rotation_summary, SECTOR_ETFS
+from putcall_scanner import (
+    scan_putcall_ratios,
+    get_extreme_readings,
+    get_market_pc_summary,
+)
 import ai_assistant as ai
 
 
@@ -337,6 +344,13 @@ for state_key, default_value in [
     ("ea_result", None),
     ("ea_ticker", ""),
     ("ea_fetched_at", None),
+    ("thesis_text", ""),
+    ("thesis_ticker", ""),
+    ("thesis_fetched_at", None),
+    ("sector_df", None),
+    ("sector_fetched_at", None),
+    ("pc_df", None),
+    ("pc_fetched_at", None),
     ("gex_ticker", ""),
     ("gex_data", None),
     ("gex_spot", 0.0),
@@ -1262,7 +1276,7 @@ if st.session_state["trader_mode"] is None:
 
 elif st.session_state["trader_mode"] == "stocks":
 
-    stab1, stab2, stab3, stab4, stab5, stab6, stab7, stab8, stab9 = st.tabs([
+    stab1, stab2, stab3, stab4, stab5, stab6, stab7, stab8, stab9, stab10, stab11 = st.tabs([
         "Ticker\nAnalysis",
         "Earnings\nCalendar",
         "Market\nScreener",
@@ -1272,6 +1286,8 @@ elif st.session_state["trader_mode"] == "stocks":
         "Hedge Fund\n13F",
         "Macro\nDashboard",
         "Earnings\nAnalytics",
+        "Sector\nRotation",
+        "AI Trade\nThesis",
     ])
 
     with stab1:
@@ -1782,13 +1798,157 @@ elif st.session_state["trader_mode"] == "stocks":
             st.info("Enter a ticker and click **Analyse Earnings** to get pre-earnings intelligence.")
 
 
+    # ── SECTOR ROTATION ───────────────────────────────────────────────────────
+    with stab10:
+        st.markdown(
+            "**Sector Rotation Tracker** — monitors money flows across all 11 S&P 500 sector ETFs. "
+            "Leading sectors show where institutional money is moving. "
+            "Source: yfinance (free, no API key)."
+        )
+
+        col_run_sr, col_info_sr = st.columns([1, 4])
+        with col_run_sr:
+            run_sr = st.button("Refresh Sectors", use_container_width=True)
+        with col_info_sr:
+            if st.session_state["sector_fetched_at"]:
+                st.caption(f"Last run: {st.session_state['sector_fetched_at']}")
+
+        if run_sr:
+            with st.spinner("Fetching sector ETF data…"):
+                sector_df = get_sector_rotation()
+            st.session_state["sector_df"] = sector_df
+            st.session_state["sector_fetched_at"] = _now()
+
+        sector_df = st.session_state["sector_df"]
+        if sector_df is not None and not sector_df.empty:
+            summary = get_rotation_summary(sector_df)
+
+            st.markdown(f"### {summary.get('risk_regime', '')}")
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Leading Sectors", summary.get("leading_sectors", "—"))
+            c2.metric("Cyclical Avg 1M", f"{summary.get('cyclical_avg_1m', 0):+.1f}%")
+            c3.metric("Defensive Avg 1M", f"{summary.get('defensive_avg_1m', 0):+.1f}%")
+
+            st.divider()
+
+            # Heatmap-style colour bar chart by 1M return
+            fig_sr = px.bar(
+                sector_df,
+                x="sector", y="ret_1m",
+                color="ret_1m",
+                color_continuous_scale="RdYlGn",
+                color_continuous_midpoint=0,
+                text="ret_1m",
+                title="Sector 1-Month Returns — Rotating In (green) vs Out (red)",
+                hover_data={"etf": True, "ret_1w": True, "ret_3m": True,
+                            "vol_ratio": True, "flow_label": True},
+            )
+            fig_sr.update_traces(texttemplate="%{text:+.1f}%", textposition="outside")
+            fig_sr.update_layout(
+                height=420, margin=dict(t=50, b=40),
+                coloraxis_showscale=False,
+                xaxis_title="", yaxis_title="1M Return %",
+                yaxis_zeroline=True,
+            )
+            st.plotly_chart(fig_sr, use_container_width=True)
+
+            # Momentum table
+            disp_sr = sector_df[[
+                "etf", "sector", "price", "ret_1w", "ret_1m",
+                "ret_3m", "vol_ratio", "momentum_rank", "flow_label",
+            ]].copy()
+            disp_sr.columns = [
+                "ETF", "Sector", "Price", "1W %", "1M %",
+                "3M %", "Vol Ratio", "Momentum Rank", "Signal",
+            ]
+            st.dataframe(disp_sr, use_container_width=True, hide_index=True)
+
+            # 3-period comparison chart
+            melt = sector_df[["sector", "ret_1w", "ret_1m", "ret_3m"]].melt(
+                id_vars="sector", var_name="Period", value_name="Return %"
+            )
+            melt["Period"] = melt["Period"].map(
+                {"ret_1w": "1 Week", "ret_1m": "1 Month", "ret_3m": "3 Months"}
+            )
+            fig_multi = px.bar(
+                melt, x="sector", y="Return %", color="Period", barmode="group",
+                title="Sector Performance — 1W / 1M / 3M",
+                color_discrete_map={"1 Week": "#3498db", "1 Month": "#2ecc71", "3 Months": "#e67e22"},
+            )
+            fig_multi.update_layout(height=350, margin=dict(t=50, b=40), xaxis_title="")
+            st.plotly_chart(fig_multi, use_container_width=True)
+        else:
+            st.info("Click **Refresh Sectors** to load sector rotation data.")
+
+
+    # ── AI TRADE THESIS ───────────────────────────────────────────────────────
+    with stab11:
+        st.markdown(
+            "**AI Trade Thesis Generator** — one-click synthesis of all platform data "
+            "into a structured, actionable trade brief. Powered by Claude AI.\n\n"
+            "_Tip: run Earnings Analytics, GEX Heatmap, and Unusual Flow first — "
+            "the thesis automatically incorporates any data already loaded._"
+        )
+
+        col_thesis_ticker, col_thesis_model, col_thesis_run = st.columns([2, 2, 1])
+        with col_thesis_ticker:
+            thesis_ticker = st.text_input(
+                "Ticker", placeholder="e.g. NVDA", key="thesis_ticker_input"
+            ).upper().strip()
+        with col_thesis_model:
+            thesis_model = st.selectbox(
+                "Model",
+                {
+                    "Haiku (fast, cheap)": "claude-haiku-4-5-20251001",
+                    "Sonnet (deeper analysis)": "claude-sonnet-4-6",
+                },
+                key="thesis_model_select",
+            )
+        with col_thesis_run:
+            st.write("")
+            run_thesis = st.button("Generate Thesis", use_container_width=True, type="primary")
+
+        if run_thesis and thesis_ticker:
+            model_id = {
+                "Haiku (fast, cheap)": "claude-haiku-4-5-20251001",
+                "Sonnet (deeper analysis)": "claude-sonnet-4-6",
+            }.get(thesis_model, "claude-haiku-4-5-20251001")
+
+            with st.spinner(f"Generating AI trade thesis for {thesis_ticker}…"):
+                thesis_text = generate_thesis(
+                    thesis_ticker,
+                    session_state=dict(st.session_state),
+                    model=model_id,
+                )
+            st.session_state["thesis_text"] = thesis_text
+            st.session_state["thesis_ticker"] = thesis_ticker
+            st.session_state["thesis_fetched_at"] = _now()
+
+        if st.session_state["thesis_fetched_at"]:
+            st.caption(
+                f"Ticker: {st.session_state['thesis_ticker']} | "
+                f"Generated: {st.session_state['thesis_fetched_at']}"
+            )
+            st.warning(
+                "⚠️ AI-generated analysis is for research purposes only. "
+                "Not financial advice. Always do your own due diligence.",
+                icon="⚠️",
+            )
+            st.markdown(st.session_state["thesis_text"])
+        else:
+            st.info(
+                "Enter a ticker and click **Generate Thesis**. "
+                "For best results, first load Earnings Analytics + GEX + Unusual Flow for the same ticker."
+            )
+
+
 # =========================
 # OPTIONS MODE
 # =========================
 
 elif st.session_state["trader_mode"] == "options":
 
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13 = st.tabs([
         "Options\nScreener",
         "Volume\nLeaders",
         "Rapid\nMovers",
@@ -1801,6 +1961,7 @@ elif st.session_state["trader_mode"] == "options":
         "Unusual\nFlow",
         "GEX\nHeatmap",
         "Congress\nTrades",
+        "Put/Call\nSentiment",
     ])
 
     # =========================
@@ -2947,3 +3108,111 @@ elif st.session_state["trader_mode"] == "options":
             st.info("No disclosures found for the selected period/filters. Try increasing 'Days back'.")
         else:
             st.info("Click **Load Congress Trades** to fetch recent congressional disclosures.")
+
+
+    # =========================
+    # PUT/CALL SENTIMENT
+    # =========================
+
+    with tab13:
+        st.markdown(
+            "**Put/Call Ratio Scanner** — scans the options universe for sentiment extremes. "
+            "High P/C (≥1.5) = heavy put buying / bearish fear — contrarian bulls watch here. "
+            "Low P/C (≤0.5) = heavy call buying / complacency — contrarian bears watch here. "
+            "Source: yfinance (free, no API key)."
+        )
+
+        col_run_pc, col_info_pc = st.columns([1, 4])
+        with col_run_pc:
+            run_pc = st.button("Scan Put/Call Ratios", use_container_width=True)
+        with col_info_pc:
+            if st.session_state["pc_fetched_at"]:
+                st.caption(f"Last run: {st.session_state['pc_fetched_at']}")
+
+        if run_pc:
+            with st.spinner(f"Scanning P/C ratios for {len(TICKERS)} tickers…"):
+                pc_df = scan_putcall_ratios(TICKERS)
+            st.session_state["pc_df"] = pc_df
+            st.session_state["pc_fetched_at"] = _now()
+
+        pc_df = st.session_state["pc_df"]
+        if pc_df is not None and not pc_df.empty:
+            mkt = get_market_pc_summary(pc_df)
+            bearish_df, bullish_df = get_extreme_readings(pc_df, top_n=10)
+
+            # Market-wide summary
+            mc1, mc2, mc3, mc4 = st.columns(4)
+            mc1.metric("Market P/C Ratio", f"{mkt.get('market_pc_ratio', 0):.2f}")
+            mc2.metric("Total Call Vol", f"{mkt.get('total_call_vol', 0):,}")
+            mc3.metric("Total Put Vol", f"{mkt.get('total_put_vol', 0):,}")
+            mc4.metric("Market Sentiment", mkt.get("market_sentiment", "—")[:20])
+
+            st.caption(f"**{mkt.get('market_sentiment', '')}** | "
+                       f"{mkt.get('bearish_count', 0)} bearish tickers | "
+                       f"{mkt.get('bullish_count', 0)} bullish tickers")
+
+            st.divider()
+
+            pctab1, pctab2, pctab3 = st.tabs(
+                ["Most Bearish (Contrarian Longs)", "Most Bullish (Contrarian Shorts)", "Full Table"]
+            )
+
+            col_rename = {
+                "ticker": "Ticker", "spot": "Price",
+                "call_vol": "Call Vol", "put_vol": "Put Vol",
+                "pc_vol_ratio": "P/C Vol",
+                "call_oi": "Call OI", "put_oi": "Put OI",
+                "pc_oi_ratio": "P/C OI",
+                "iv_skew": "IV Skew",
+                "sentiment": "Sentiment",
+            }
+
+            with pctab1:
+                st.caption("Highest P/C ratio = heaviest put buying relative to calls")
+                if not bearish_df.empty:
+                    st.dataframe(
+                        bearish_df.rename(columns=col_rename),
+                        use_container_width=True, hide_index=True,
+                    )
+                    fig_b = px.bar(
+                        bearish_df.head(10), x="ticker", y="pc_vol_ratio",
+                        color="pc_vol_ratio",
+                        color_continuous_scale=[[0, "#ff4444"], [1, "#8b0000"]],
+                        title="Most Bearish Tickers by P/C Volume Ratio",
+                        text="pc_vol_ratio",
+                    )
+                    fig_b.update_traces(texttemplate="%{text:.2f}", textposition="outside")
+                    fig_b.add_hline(y=1.0, line_dash="dot", line_color="white",
+                                    annotation_text="Neutral (1.0)")
+                    fig_b.update_layout(height=350, margin=dict(t=50, b=20),
+                                        coloraxis_showscale=False, xaxis_title="")
+                    st.plotly_chart(fig_b, use_container_width=True)
+
+            with pctab2:
+                st.caption("Lowest P/C ratio = heaviest call buying relative to puts")
+                if not bullish_df.empty:
+                    st.dataframe(
+                        bullish_df.rename(columns=col_rename),
+                        use_container_width=True, hide_index=True,
+                    )
+                    fig_bl = px.bar(
+                        bullish_df.head(10), x="ticker", y="pc_vol_ratio",
+                        color="pc_vol_ratio",
+                        color_continuous_scale=[[0, "#004400"], [1, "#00cc44"]],
+                        title="Most Bullish Tickers by P/C Volume Ratio",
+                        text="pc_vol_ratio",
+                    )
+                    fig_bl.update_traces(texttemplate="%{text:.2f}", textposition="outside")
+                    fig_bl.add_hline(y=1.0, line_dash="dot", line_color="white",
+                                     annotation_text="Neutral (1.0)")
+                    fig_bl.update_layout(height=350, margin=dict(t=50, b=20),
+                                         coloraxis_showscale=False, xaxis_title="")
+                    st.plotly_chart(fig_bl, use_container_width=True)
+
+            with pctab3:
+                st.dataframe(
+                    pc_df.rename(columns=col_rename),
+                    use_container_width=True, hide_index=True,
+                )
+        else:
+            st.info("Click **Scan Put/Call Ratios** to analyse options sentiment across the universe.")
