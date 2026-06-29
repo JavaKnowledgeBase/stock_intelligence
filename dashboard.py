@@ -44,6 +44,19 @@ from congress_tracker import (
     get_top_congress_tickers,
     get_most_active_politicians,
 )
+from hedge_fund_tracker import (
+    KNOWN_FUNDS,
+    get_fund_holdings,
+    get_multi_fund_top_holdings,
+    get_conviction_plays,
+)
+from macro_dashboard import (
+    get_macro_indicators,
+    get_latest_values,
+    get_yield_curve,
+    classify_market_regime,
+    FRED_SERIES,
+)
 import ai_assistant as ai
 
 
@@ -310,6 +323,16 @@ for state_key, default_value in [
     ("movers_fetched_at", None),
     ("unusual_flow_df", None),
     ("unusual_flow_fetched_at", None),
+    ("hf_holdings_df", None),
+    ("hf_fund_name", ""),
+    ("hf_filing_date", ""),
+    ("hf_multi_df", None),
+    ("hf_fetched_at", None),
+    ("macro_indicators", None),
+    ("macro_latest", None),
+    ("macro_yield_history", None),
+    ("macro_yield_curve", None),
+    ("macro_fetched_at", None),
     ("gex_ticker", ""),
     ("gex_data", None),
     ("gex_spot", 0.0),
@@ -1235,13 +1258,15 @@ if st.session_state["trader_mode"] is None:
 
 elif st.session_state["trader_mode"] == "stocks":
 
-    stab1, stab2, stab3, stab4, stab5, stab6 = st.tabs([
+    stab1, stab2, stab3, stab4, stab5, stab6, stab7, stab8 = st.tabs([
         "Ticker\nAnalysis",
         "Earnings\nCalendar",
         "Market\nScreener",
         "Insider\nFlow",
         "News\nSentiment",
         "Top\nMovers",
+        "Hedge Fund\n13F",
+        "Macro\nDashboard",
     ])
 
     with stab1:
@@ -1261,6 +1286,300 @@ elif st.session_state["trader_mode"] == "stocks":
 
     with stab6:
         _render_top_movers()
+
+    # ── HEDGE FUND 13F ────────────────────────────────────────────────────────
+    with stab7:
+        st.markdown(
+            "**Hedge Fund 13F Holdings Tracker** — quarterly portfolio disclosures "
+            "filed with the SEC by institutions managing >$100M in equities. "
+            "Data sourced from [SEC EDGAR](https://data.sec.gov) — official, free, no API key."
+        )
+
+        hf_view = st.radio(
+            "View", ["Single Fund", "Top Holdings Across Funds", "Conviction Plays (Multi-Fund)"],
+            horizontal=True,
+        )
+
+        if hf_view == "Single Fund":
+            col_fund, col_run_hf = st.columns([3, 1])
+            with col_fund:
+                selected_fund = st.selectbox("Select Fund", list(KNOWN_FUNDS.keys()))
+            with col_run_hf:
+                st.write("")
+                run_hf = st.button("Load 13F", use_container_width=True)
+
+            if run_hf:
+                with st.spinner(f"Fetching {selected_fund} 13F from SEC EDGAR…"):
+                    hf_df, filing_date, _ = get_fund_holdings(selected_fund)
+                st.session_state["hf_holdings_df"] = hf_df
+                st.session_state["hf_fund_name"] = selected_fund
+                st.session_state["hf_filing_date"] = filing_date
+                st.session_state["hf_fetched_at"] = _now()
+
+            if st.session_state["hf_fetched_at"]:
+                st.caption(
+                    f"Fund: **{st.session_state['hf_fund_name']}** | "
+                    f"Filing date: {st.session_state['hf_filing_date']} | "
+                    f"Fetched: {st.session_state['hf_fetched_at']}"
+                )
+
+            hf_df = st.session_state["hf_holdings_df"]
+            if hf_df is not None and not hf_df.empty:
+                total_aum = hf_df["value_usd"].sum()
+                st.metric("Portfolio AUM (13F)", f"${total_aum/1e9:.1f}B")
+
+                display_hf = hf_df.copy()
+                display_hf["value_usd"] = display_hf["value_usd"].apply(
+                    lambda v: f"${v/1e6:.1f}M"
+                )
+                display_hf["shares"] = display_hf["shares"].apply(lambda v: f"{v:,}")
+                display_hf = display_hf.rename(columns={
+                    "company": "Company",
+                    "cusip": "CUSIP",
+                    "shares": "Shares / Units",
+                    "unit": "Type",
+                    "value_usd": "Market Value",
+                    "pct_portfolio": "% Portfolio",
+                })
+                st.dataframe(display_hf, use_container_width=True, hide_index=True)
+
+                # Top-10 treemap
+                top10 = hf_df.head(10).copy()
+                fig_hf = px.treemap(
+                    top10,
+                    path=["company"],
+                    values="value_usd",
+                    title=f"{st.session_state['hf_fund_name']} — Top 10 Holdings",
+                    color="pct_portfolio",
+                    color_continuous_scale="Blues",
+                )
+                fig_hf.update_layout(height=400, margin=dict(t=40, b=10))
+                st.plotly_chart(fig_hf, use_container_width=True)
+            elif run_hf:
+                st.warning(
+                    "No 13F data found. The fund may not have filed yet this quarter, "
+                    "use confidential treatment, or the CIK may need updating."
+                )
+
+        elif hf_view == "Top Holdings Across Funds":
+            col_funds_sel, col_top_n, col_run_multi = st.columns([3, 1, 1])
+            with col_funds_sel:
+                selected_funds = st.multiselect(
+                    "Funds to scan",
+                    list(KNOWN_FUNDS.keys()),
+                    default=list(KNOWN_FUNDS.keys())[:5],
+                )
+            with col_top_n:
+                top_n_per = st.number_input("Top N per fund", min_value=5, max_value=50, value=15)
+            with col_run_multi:
+                st.write("")
+                run_multi = st.button("Scan Funds", use_container_width=True)
+
+            if run_multi and selected_funds:
+                with st.spinner(f"Fetching 13Fs for {len(selected_funds)} funds from SEC EDGAR…"):
+                    multi_df = get_multi_fund_top_holdings(selected_funds, int(top_n_per))
+                st.session_state["hf_multi_df"] = multi_df
+                st.session_state["hf_fetched_at"] = _now()
+
+            multi_df = st.session_state["hf_multi_df"]
+            if multi_df is not None and not multi_df.empty:
+                st.caption(f"{len(multi_df)} holdings across {multi_df['fund'].nunique()} funds")
+                display_multi = multi_df.copy()
+                display_multi["value_usd"] = display_multi["value_usd"].apply(
+                    lambda v: f"${v/1e6:.1f}M"
+                )
+                display_multi = display_multi.rename(columns={
+                    "company": "Company", "fund": "Fund",
+                    "filing_date": "Filed", "value_usd": "Value",
+                    "pct_portfolio": "% of Fund",
+                })
+                st.dataframe(display_multi, use_container_width=True, hide_index=True)
+            else:
+                st.info("Select funds and click **Scan Funds**.")
+
+        else:  # Conviction Plays
+            col_funds_cv, col_min_funds, col_run_cv = st.columns([3, 1, 1])
+            with col_funds_cv:
+                cv_funds = st.multiselect(
+                    "Funds to compare",
+                    list(KNOWN_FUNDS.keys()),
+                    default=list(KNOWN_FUNDS.keys())[:8],
+                )
+            with col_min_funds:
+                min_funds = st.number_input("Min funds holding", min_value=2, max_value=10, value=3)
+            with col_run_cv:
+                st.write("")
+                run_cv = st.button("Find Overlaps", use_container_width=True)
+
+            if run_cv and cv_funds:
+                with st.spinner(f"Fetching 13Fs and finding overlaps…"):
+                    multi_df = get_multi_fund_top_holdings(cv_funds, 30)
+                    st.session_state["hf_multi_df"] = multi_df
+                    st.session_state["hf_fetched_at"] = _now()
+
+            multi_df = st.session_state["hf_multi_df"]
+            if multi_df is not None and not multi_df.empty:
+                conviction_df = get_conviction_plays(multi_df, int(min_funds))
+                if not conviction_df.empty:
+                    st.subheader(f"Stocks held by ≥{min_funds} funds simultaneously")
+                    st.caption("High overlap = institutional conviction — these are the highest-consensus positions")
+                    disp_cv = conviction_df.copy()
+                    disp_cv["total_value"] = disp_cv["total_value"].apply(lambda v: f"${v/1e6:.1f}M")
+                    disp_cv["avg_pct"] = disp_cv["avg_pct"].apply(lambda v: f"{v:.2f}%")
+                    disp_cv = disp_cv.rename(columns={
+                        "company": "Company", "funds_holding": "# Funds",
+                        "fund_names": "Funds", "total_value": "Combined Value",
+                        "avg_pct": "Avg % of Fund",
+                    })
+                    st.dataframe(disp_cv, use_container_width=True, hide_index=True)
+                else:
+                    st.info(f"No stocks found held by ≥{min_funds} of the selected funds.")
+            else:
+                st.info("Select funds and click **Find Overlaps**.")
+
+
+    # ── MACRO DASHBOARD ───────────────────────────────────────────────────────
+    with stab8:
+        st.markdown(
+            "**Macro Economic Dashboard** — key indicators from official government sources. "
+            "Data: [FRED](https://fred.stlouisfed.org) (Federal Reserve St. Louis) · "
+            "[Treasury.gov](https://home.treasury.gov) yield curve. "
+            "**No API key required.**"
+        )
+
+        col_run_macro, col_years, col_info_macro = st.columns([1, 1, 3])
+        with col_run_macro:
+            run_macro = st.button("Refresh Macro Data", use_container_width=True)
+        with col_years:
+            macro_years = st.selectbox("History", [1, 2, 3, 5], index=2)
+        with col_info_macro:
+            if st.session_state["macro_fetched_at"]:
+                st.caption(f"Last fetched: {st.session_state['macro_fetched_at']}")
+
+        if run_macro:
+            with st.spinner("Fetching macro indicators from FRED and Treasury.gov…"):
+                indicators = get_macro_indicators(years_back=int(macro_years))
+                latest_vals = get_latest_values(indicators)
+                yield_history, yield_curve = get_yield_curve(months_back=3)
+            st.session_state["macro_indicators"] = indicators
+            st.session_state["macro_latest"] = latest_vals
+            st.session_state["macro_yield_history"] = yield_history
+            st.session_state["macro_yield_curve"] = yield_curve
+            st.session_state["macro_fetched_at"] = _now()
+
+        latest_vals = st.session_state["macro_latest"]
+        if latest_vals:
+            # Market regime banner
+            regime_info = classify_market_regime(latest_vals)
+            st.markdown(f"### Market Regime: {regime_info['regime']}")
+            for sig in regime_info["signals"]:
+                st.caption(sig)
+
+            st.divider()
+
+            # Key metric tiles
+            m1, m2, m3, m4, m5 = st.columns(5)
+            def _fmt(key, fmt=".2f"):
+                v = (latest_vals.get(key) or {}).get("value")
+                d = (latest_vals.get(key) or {}).get("date", "")
+                return (f"{v:{fmt}}" if v is not None else "—"), d
+
+            fed_v, fed_d = _fmt("fed_funds")
+            cpi_v, cpi_d = _fmt("cpi_yoy")
+            ur_v, ur_d = _fmt("unemployment")
+            sp_v, sp_d = _fmt("yield_spread")
+            vix_v, vix_d = _fmt("vix", ".1f")
+
+            m1.metric("Fed Funds Rate", f"{fed_v}%", help=fed_d)
+            m2.metric("CPI YoY", f"{cpi_v}%", help=cpi_d)
+            m3.metric("Unemployment", f"{ur_v}%", help=ur_d)
+            m4.metric("10Y-2Y Spread", f"{sp_v}%", help=sp_d)
+            m5.metric("VIX", vix_v, help=vix_d)
+
+            st.divider()
+
+            indicators = st.session_state["macro_indicators"]
+            if indicators:
+                macro_tab1, macro_tab2, macro_tab3 = st.tabs(
+                    ["Rates & Inflation", "Employment & VIX", "Yield Curve"]
+                )
+
+                with macro_tab1:
+                    col_a, col_b = st.columns(2)
+                    with col_a:
+                        df_ff = indicators.get("fed_funds", pd.DataFrame())
+                        if not df_ff.empty:
+                            fig = px.line(df_ff, x="date", y="value",
+                                          title="Fed Funds Rate (%)", color_discrete_sequence=["#3498db"])
+                            fig.update_layout(height=300, margin=dict(t=40, b=20),
+                                              yaxis_title="%", xaxis_title="")
+                            st.plotly_chart(fig, use_container_width=True)
+                    with col_b:
+                        df_cpi = indicators.get("cpi_yoy", pd.DataFrame())
+                        if not df_cpi.empty:
+                            fig = px.line(df_cpi, x="date", y="value",
+                                          title="CPI Year-over-Year (%)", color_discrete_sequence=["#e74c3c"])
+                            fig.add_hline(y=2.0, line_dash="dot", line_color="gray",
+                                          annotation_text="Fed target 2%")
+                            fig.update_layout(height=300, margin=dict(t=40, b=20),
+                                              yaxis_title="%", xaxis_title="")
+                            st.plotly_chart(fig, use_container_width=True)
+
+                    df_spread = indicators.get("yield_spread", pd.DataFrame())
+                    if not df_spread.empty:
+                        fig_sp = px.line(df_spread, x="date", y="value",
+                                         title="10Y-2Y Treasury Spread (inversion = recession signal)",
+                                         color_discrete_sequence=["#f39c12"])
+                        fig_sp.add_hline(y=0, line_dash="dash", line_color="red",
+                                         annotation_text="Inversion")
+                        fig_sp.update_layout(height=280, margin=dict(t=40, b=20),
+                                             yaxis_title="%", xaxis_title="")
+                        st.plotly_chart(fig_sp, use_container_width=True)
+
+                with macro_tab2:
+                    col_c, col_d = st.columns(2)
+                    with col_c:
+                        df_ur = indicators.get("unemployment", pd.DataFrame())
+                        if not df_ur.empty:
+                            fig = px.line(df_ur, x="date", y="value",
+                                          title="Unemployment Rate (%)", color_discrete_sequence=["#9b59b6"])
+                            fig.update_layout(height=300, margin=dict(t=40, b=20),
+                                              yaxis_title="%", xaxis_title="")
+                            st.plotly_chart(fig, use_container_width=True)
+                    with col_d:
+                        df_vix = indicators.get("vix", pd.DataFrame())
+                        if not df_vix.empty:
+                            fig = px.line(df_vix, x="date", y="value",
+                                          title="VIX (Fear Index)", color_discrete_sequence=["#e67e22"])
+                            fig.add_hline(y=20, line_dash="dot", line_color="yellow",
+                                          annotation_text="Elevated (20)")
+                            fig.add_hline(y=30, line_dash="dot", line_color="red",
+                                          annotation_text="Fear (30)")
+                            fig.update_layout(height=300, margin=dict(t=40, b=20),
+                                              yaxis_title="VIX", xaxis_title="")
+                            st.plotly_chart(fig, use_container_width=True)
+
+                with macro_tab3:
+                    yield_curve = st.session_state["macro_yield_curve"]
+                    yield_history = st.session_state["macro_yield_history"]
+
+                    if yield_curve is not None and not yield_curve.empty:
+                        fig_yc = px.line(yield_curve, x="Tenor", y="Yield %",
+                                         title="U.S. Treasury Yield Curve (most recent)",
+                                         markers=True, color_discrete_sequence=["#2ecc71"])
+                        fig_yc.update_layout(height=350, margin=dict(t=40, b=20))
+                        st.plotly_chart(fig_yc, use_container_width=True)
+                        st.dataframe(yield_curve, use_container_width=True, hide_index=True)
+
+                    if yield_history is not None and not yield_history.empty:
+                        fig_10y = px.line(yield_history, x="date", y="10Y",
+                                          title="10-Year Treasury Yield History",
+                                          color_discrete_sequence=["#1abc9c"])
+                        fig_10y.update_layout(height=280, margin=dict(t=40, b=20),
+                                              yaxis_title="%", xaxis_title="")
+                        st.plotly_chart(fig_10y, use_container_width=True)
+        else:
+            st.info("Click **Refresh Macro Data** to load economic indicators.")
 
 
 # =========================
