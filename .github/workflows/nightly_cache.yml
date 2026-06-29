@@ -1,0 +1,39 @@
+name: Nightly Cache Build
+
+on:
+  schedule:
+    # 2:00 AM UTC = 10:00 PM ET — after US markets close, before Asian open
+    - cron: '0 2 * * 2-6'   # Tue–Sat UTC = Mon–Fri ET nights
+  workflow_dispatch:          # allow manual trigger from GitHub Actions UI
+
+jobs:
+  build-cache:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90      # generous limit; typical run ~40–60 min
+
+    env:
+      R2_BUCKET_NAME:        ${{ secrets.R2_BUCKET_NAME }}
+      R2_ENDPOINT_URL:       ${{ secrets.R2_ENDPOINT_URL }}
+      R2_ACCESS_KEY_ID:      ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY:  ${{ secrets.R2_SECRET_ACCESS_KEY }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Build nightly cache
+        run: python nightly_cache_builder.py
+
+      - name: Report build time
+        if: always()
+        run: |
+          echo "Build finished at $(date -u '+%Y-%m-%d %H:%M:%S UTC')"

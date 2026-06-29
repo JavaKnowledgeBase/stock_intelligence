@@ -66,6 +66,7 @@ from putcall_scanner import (
     get_market_pc_summary,
 )
 import ai_assistant as ai
+import cache_loader
 
 
 ensure_assets_available()
@@ -118,6 +119,22 @@ def get_build_label():
 
 st.title("Market Intelligence Platform")
 st.caption(f"Branch: `main` | Build: `{get_build_label()}`")
+
+# ── Nightly cache auto-load (runs once per browser session) ───────────────────
+if "nightly_cache_loaded" not in st.session_state:
+    with st.spinner("Loading pre-computed market data…"):
+        _cache_meta = cache_loader.load_into_session_state(st.session_state)
+    st.session_state["nightly_cache_loaded"] = True
+    st.session_state["nightly_cache_meta"] = _cache_meta
+
+_cache_meta = st.session_state.get("nightly_cache_meta", {})
+if _cache_meta.get("status") == "loaded":
+    _built_at = _cache_meta.get("built_at", "")[:16].replace("T", " ")
+    st.sidebar.success(f"Cache loaded — data as of {_built_at} UTC")
+elif _cache_meta.get("status") == "partial":
+    _built_at = _cache_meta.get("built_at", "")[:16].replace("T", " ")
+    st.sidebar.warning(f"Cache partial — {_built_at} UTC")
+# ─────────────────────────────────────────────────────────────────────────────
 
 
 # =========================
