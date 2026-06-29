@@ -1,145 +1,188 @@
 """
-Congress Trade Tracker — fetches recent congressional stock disclosures.
+Congress Trade Tracker — fetches STOCK Act disclosures from two free public APIs:
 
-Primary source: Quiver Quantitative free API (https://api.quiverquant.com).
-Set QUIVER_API_KEY in Streamlit Cloud secrets (or .env locally).
+  House: https://housestockwatcher.com/api  (JSON, no key)
+  Senate: https://senatestockwatcher.com/api (JSON, no key)
 
-Without an API key the module returns empty DataFrames and the dashboard
-shows a helpful setup message instead of an error.
+Both sites aggregate the official government PTR filings daily.
+No API key or registration needed.
 """
 
-import os
 from datetime import datetime, timedelta
 
 import pandas as pd
 import requests
 
-_BASE = "https://api.quiverquant.com/beta"
-_TIMEOUT = 15
+_TIMEOUT = 20
+
+# S3 aggregate endpoints backed by the two community projects
+_HOUSE_URL = "https://house-stock-watcher-data.s3-us-west-2.amazonaws.com/data/all_transactions.json"
+_SENATE_URL = "https://senate-stock-watcher-data.s3-us-west-2.amazonaws.com/aggregate/all_transactions.json"
+
+# Fallback: direct site API endpoints
+_HOUSE_API = "https://housestockwatcher.com/api"
+_SENATE_API = "https://senatestockwatcher.com/api"
 
 
-def _key() -> str | None:
-    return os.getenv("QUIVER_API_KEY", "").strip() or None
-
-
-def _headers() -> dict:
-    return {"Accept": "application/json", "Authorization": f"Token {_key()}"}
-
-
-def _get(path: str) -> list[dict]:
-    try:
-        resp = requests.get(f"{_BASE}{path}", headers=_headers(), timeout=_TIMEOUT)
-        resp.raise_for_status()
-        return resp.json() or []
-    except Exception:
-        return []
-
-
-def get_congress_trades(
-    days_back: int = 60,
-    ticker: str | None = None,
-) -> pd.DataFrame:
-    """
-    Fetch congressional stock transaction disclosures.
-
-    Returns DataFrame with columns:
-      trade_date, filed_date, politician, party, chamber,
-      ticker, company, transaction, amount
-    """
-    if not _key():
-        return pd.DataFrame()
-
-    path = f"/live/congresstrading/{ticker}" if ticker else "/live/congresstrading"
-    data = _get(path)
-    if not data:
-        return pd.DataFrame()
-
-    cutoff = datetime.now() - timedelta(days=days_back)
-    rows = []
-
-    for item in data:
+def _fetch_json(primary: str, fallback: str) -> list[dict]:
+    for url in (primary, fallback):
         try:
-            # Quiver Quant field names (may vary slightly by endpoint version)
-            trade_date_raw = (
-                item.get("Date")
-                or item.get("TradeDate")
-                or item.get("Transaction_Date")
-                or ""
-            )
-            filed_date_raw = (
-                item.get("ReportDate")
-                or item.get("Filed_Date")
-                or ""
-            )
-
-            trade_date = pd.to_datetime(trade_date_raw, errors="coerce")
-            if pd.notna(trade_date) and trade_date.to_pydatetime() < cutoff:
-                continue
-
-            politician = (
-                item.get("Representative")
-                or item.get("Senator")
-                or item.get("Name")
-                or "Unknown"
-            )
-            party_raw = item.get("Party") or ""
-            party_symbol = (
-                "🔴 R" if "R" in party_raw.upper()
-                else "🔵 D" if "D" in party_raw.upper()
-                else party_raw
-            )
-
-            amount_raw = item.get("Amount") or ""
-            amount_str = _parse_amount(amount_raw)
-
-            rows.append({
-                "trade_date": trade_date_raw,
-                "filed_date": filed_date_raw,
-                "politician": politician,
-                "party": party_symbol,
-                "chamber": item.get("Chamber") or "",
-                "ticker": str(item.get("Ticker") or "").upper(),
-                "company": item.get("Company") or "",
-                "transaction": _normalise_txn(item.get("Transaction") or ""),
-                "amount": amount_str,
-            })
+            resp = requests.get(url, timeout=_TIMEOUT, headers={"User-Agent": "Mozilla/5.0"})
+            resp.raise_for_status()
+            data = resp.json()
+            # Both endpoints return either a list or {"data": [...]}
+            if isinstance(data, list):
+                return data
+            if isinstance(data, dict):
+                return data.get("data", []) or data.get("transactions", []) or []
         except Exception:
             continue
-
-    if not rows:
-        return pd.DataFrame()
-
-    df = pd.DataFrame(rows)
-    df["trade_date"] = pd.to_datetime(df["trade_date"], errors="coerce")
-    df = df.sort_values("trade_date", ascending=False).reset_index(drop=True)
-    return df
+    return []
 
 
 def _normalise_txn(txn: str) -> str:
-    t = txn.strip().lower()
+    t = (txn or "").strip().lower()
     if "purchase" in t or "buy" in t:
         return "🟢 Buy"
     if "sale" in t or "sell" in t:
         return "🔴 Sell"
     if "exchange" in t:
         return "🔄 Exchange"
-    return txn.strip() or "Other"
+    return (txn or "Other").strip()
 
 
-def _parse_amount(raw: str) -> str:
-    """Convert Quiver's amount codes to human-readable ranges."""
-    mapping = {
-        "1-15000": "$1K – $15K",
-        "15001-50000": "$15K – $50K",
-        "50001-100000": "$50K – $100K",
-        "100001-250000": "$100K – $250K",
-        "250001-500000": "$250K – $500K",
-        "500001-1000000": "$500K – $1M",
-        "1000001-5000000": "$1M – $5M",
-        "5000001-25000000": "$5M – $25M",
-        "25000001-50000000": "$25M – $50M",
-    }
-    return mapping.get(str(raw).strip(), str(raw))
+def _parse_house(raw: list[dict]) -> pd.DataFrame:
+    rows = []
+    for item in raw:
+        try:
+            rows.append({
+                "trade_date": item.get("transaction_date", ""),
+                "filed_date": item.get("disclosure_date", ""),
+                "politician": item.get("representative", ""),
+                "party": item.get("party", ""),
+                "chamber": "House",
+                "state": item.get("state", ""),
+                "ticker": str(item.get("ticker") or "").upper().strip(),
+                "company": item.get("asset_description", ""),
+                "transaction": _normalise_txn(item.get("type", "")),
+                "amount": item.get("amount", ""),
+            })
+        except Exception:
+            continue
+    return pd.DataFrame(rows)
+
+
+def _parse_senate(raw: list[dict]) -> pd.DataFrame:
+    rows = []
+    for item in raw:
+        try:
+            # Senate watcher nests under each senator object
+            senator = item.get("Senator") or item.get("senator") or item.get("name", "")
+            party = item.get("Party") or item.get("party", "")
+            state = item.get("State") or item.get("state", "")
+
+            # Transactions may be a list inside each senator object
+            txns = item.get("transactions") or item.get("Transactions")
+            if txns and isinstance(txns, list):
+                for txn in txns:
+                    rows.append({
+                        "trade_date": txn.get("transaction_date", ""),
+                        "filed_date": txn.get("disclosure_date", ""),
+                        "politician": senator,
+                        "party": party,
+                        "chamber": "Senate",
+                        "state": state,
+                        "ticker": str(txn.get("ticker") or "").upper().strip(),
+                        "company": txn.get("asset_description", ""),
+                        "transaction": _normalise_txn(txn.get("type", "")),
+                        "amount": txn.get("amount", ""),
+                    })
+            else:
+                # Flat format
+                rows.append({
+                    "trade_date": item.get("transaction_date", ""),
+                    "filed_date": item.get("disclosure_date", ""),
+                    "politician": senator,
+                    "party": party,
+                    "chamber": "Senate",
+                    "state": state,
+                    "ticker": str(item.get("ticker") or "").upper().strip(),
+                    "company": item.get("asset_description", ""),
+                    "transaction": _normalise_txn(item.get("type", "")),
+                    "amount": item.get("amount", ""),
+                })
+        except Exception:
+            continue
+    return pd.DataFrame(rows)
+
+
+def get_congress_trades(
+    days_back: int = 60,
+    ticker: str | None = None,
+    chamber: str = "Both",
+) -> pd.DataFrame:
+    """
+    Fetch recent congressional STOCK Act disclosures.
+
+    Parameters
+    ----------
+    days_back : int
+        How many calendar days of history to return.
+    ticker : str | None
+        Filter to a specific ticker (case-insensitive).
+    chamber : str
+        "Both", "House", or "Senate".
+
+    Returns
+    -------
+    DataFrame with columns:
+        trade_date, filed_date, politician, party, chamber, state,
+        ticker, company, transaction, amount
+    """
+    frames = []
+
+    if chamber in ("Both", "House"):
+        raw_house = _fetch_json(_HOUSE_URL, _HOUSE_API)
+        if raw_house:
+            frames.append(_parse_house(raw_house))
+
+    if chamber in ("Both", "Senate"):
+        raw_senate = _fetch_json(_SENATE_URL, _SENATE_API)
+        if raw_senate:
+            frames.append(_parse_senate(raw_senate))
+
+    if not frames:
+        return pd.DataFrame()
+
+    df = pd.concat(frames, ignore_index=True)
+
+    # Clean up
+    df["trade_date"] = pd.to_datetime(df["trade_date"], errors="coerce")
+    df["filed_date"] = pd.to_datetime(df["filed_date"], errors="coerce")
+
+    # Date filter
+    cutoff = pd.Timestamp.now() - pd.Timedelta(days=days_back)
+    df = df[df["trade_date"] >= cutoff]
+
+    # Ticker filter
+    if ticker:
+        df = df[df["ticker"].str.upper() == ticker.upper()]
+
+    # Party emojis
+    def _party_badge(p: str) -> str:
+        p = (p or "").strip().upper()
+        if p in ("R", "REPUBLICAN"):
+            return "🔴 R"
+        if p in ("D", "DEMOCRAT", "DEMOCRATIC"):
+            return "🔵 D"
+        if p in ("I", "INDEPENDENT"):
+            return "⚪ I"
+        return p or "?"
+
+    df["party"] = df["party"].apply(_party_badge)
+
+    df = df.sort_values("trade_date", ascending=False).reset_index(drop=True)
+    return df
 
 
 def get_top_congress_tickers(df: pd.DataFrame, top_n: int = 20) -> pd.DataFrame:
@@ -147,12 +190,12 @@ def get_top_congress_tickers(df: pd.DataFrame, top_n: int = 20) -> pd.DataFrame:
     if df.empty or "ticker" not in df.columns:
         return pd.DataFrame()
 
-    ticker_df = df[df["ticker"].str.strip() != ""].copy()
-    if ticker_df.empty:
+    valid = df[df["ticker"].str.strip().ne("") & df["ticker"].ne("--")].copy()
+    if valid.empty:
         return pd.DataFrame()
 
     agg = (
-        ticker_df.groupby("ticker")
+        valid.groupby("ticker")
         .agg(
             trades=("politician", "count"),
             buys=("transaction", lambda x: (x == "🟢 Buy").sum()),
@@ -181,6 +224,7 @@ def get_most_active_politicians(df: pd.DataFrame, top_n: int = 15) -> pd.DataFra
             trades=("ticker", "count"),
             party=("party", "first"),
             chamber=("chamber", "first"),
+            state=("state", "first"),
             tickers=("ticker", lambda x: ", ".join(x.unique()[:5])),
             buys=("transaction", lambda x: (x == "🟢 Buy").sum()),
             sells=("transaction", lambda x: (x == "🔴 Sell").sum()),

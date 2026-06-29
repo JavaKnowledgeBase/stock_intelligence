@@ -2344,88 +2344,87 @@ elif st.session_state["trader_mode"] == "options":
 
     with tab12:
         st.markdown(
-            "**Congressional Trade Tracker** — real-time disclosures of stock purchases and sales "
-            "by U.S. senators and representatives (STOCK Act filings). "
-            "Powered by [Quiver Quantitative](https://www.quiverquant.com/) free API."
+            "**Congressional Trade Tracker** — STOCK Act disclosures from U.S. senators and "
+            "representatives. Data sourced from official government filings via "
+            "[House Stock Watcher](https://housestockwatcher.com) and "
+            "[Senate Stock Watcher](https://senatestockwatcher.com). "
+            "**No API key required.**"
         )
 
-        if not os.getenv("QUIVER_API_KEY", "").strip():
-            st.warning(
-                "**QUIVER_API_KEY not set.** "
-                "Sign up free at [quiverquant.com](https://www.quiverquant.com/) → "
-                "add `QUIVER_API_KEY = \"your_key\"` to Streamlit Cloud secrets."
-            )
-        else:
-            col_run_c, col_info_c = st.columns([1, 4])
-            with col_run_c:
-                run_congress = st.button("Load Congress Trades", use_container_width=True)
-            with col_info_c:
-                if st.session_state["congress_fetched_at"]:
-                    st.caption(f"Last run: {st.session_state['congress_fetched_at']}")
+        col_run_c, col_info_c = st.columns([1, 4])
+        with col_run_c:
+            run_congress = st.button("Load Congress Trades", use_container_width=True)
+        with col_info_c:
+            if st.session_state["congress_fetched_at"]:
+                st.caption(f"Last run: {st.session_state['congress_fetched_at']}")
 
-            col_days, col_ticker_c = st.columns(2)
-            with col_days:
-                congress_days = st.slider("Days back", min_value=7, max_value=180, value=60)
-            with col_ticker_c:
-                congress_ticker_filter = st.text_input(
-                    "Filter by Ticker (optional)", placeholder="e.g. NVDA"
-                ).upper().strip()
+        col_days, col_chamber, col_ticker_c = st.columns(3)
+        with col_days:
+            congress_days = st.slider("Days back", min_value=7, max_value=365, value=60)
+        with col_chamber:
+            congress_chamber = st.selectbox("Chamber", ["Both", "House", "Senate"])
+        with col_ticker_c:
+            congress_ticker_filter = st.text_input(
+                "Filter by Ticker (optional)", placeholder="e.g. NVDA"
+            ).upper().strip()
 
-            if run_congress:
-                ticker_arg = congress_ticker_filter or None
-                with st.spinner("Fetching congressional disclosures…"):
-                    congress_df = get_congress_trades(
-                        days_back=congress_days,
-                        ticker=ticker_arg,
-                    )
-                st.session_state["congress_df"] = congress_df
-                st.session_state["congress_fetched_at"] = _now()
-
-            congress_df = st.session_state["congress_df"]
-            if congress_df is not None and not congress_df.empty:
-                st.caption(
-                    f"{len(congress_df)} filings · "
-                    f"{congress_df['ticker'].nunique()} tickers · "
-                    f"{congress_df['politician'].nunique()} politicians"
+        if run_congress:
+            with st.spinner("Fetching congressional disclosures from official government feeds…"):
+                congress_df = get_congress_trades(
+                    days_back=congress_days,
+                    ticker=congress_ticker_filter or None,
+                    chamber=congress_chamber,
                 )
+            st.session_state["congress_df"] = congress_df
+            st.session_state["congress_fetched_at"] = _now()
 
-                ctab1, ctab2, ctab3 = st.tabs(["All Trades", "Top Tickers", "Most Active"])
+        congress_df = st.session_state["congress_df"]
+        if congress_df is not None and not congress_df.empty:
+            st.caption(
+                f"{len(congress_df)} filings · "
+                f"{congress_df['ticker'].nunique()} tickers · "
+                f"{congress_df['politician'].nunique()} politicians"
+            )
 
-                with ctab1:
-                    show_cols = [
-                        "trade_date", "filed_date", "politician", "party",
-                        "chamber", "ticker", "transaction", "amount",
-                    ]
-                    available = [c for c in show_cols if c in congress_df.columns]
-                    disp = congress_df[available].copy()
-                    disp.columns = [c.replace("_", " ").title() for c in disp.columns]
-                    st.dataframe(disp, use_container_width=True, hide_index=True)
+            ctab1, ctab2, ctab3 = st.tabs(["All Trades", "Top Tickers", "Most Active"])
 
-                with ctab2:
-                    top_tickers_df = get_top_congress_tickers(congress_df)
-                    if not top_tickers_df.empty:
-                        st.dataframe(top_tickers_df, use_container_width=True, hide_index=True)
+            with ctab1:
+                show_cols = [
+                    "trade_date", "filed_date", "politician", "party",
+                    "chamber", "state", "ticker", "company", "transaction", "amount",
+                ]
+                available = [c for c in show_cols if c in congress_df.columns]
+                disp = congress_df[available].copy()
+                disp["trade_date"] = disp["trade_date"].dt.strftime("%Y-%m-%d").fillna("")
+                disp["filed_date"] = disp["filed_date"].dt.strftime("%Y-%m-%d").fillna("")
+                disp.columns = [c.replace("_", " ").title() for c in disp.columns]
+                st.dataframe(disp, use_container_width=True, hide_index=True)
 
-                        fig_ct = px.bar(
-                            top_tickers_df.head(15),
-                            x="ticker", y="trades",
-                            color="sentiment",
-                            color_discrete_map={
-                                "🟢 Bullish": "#00cc44",
-                                "🔴 Bearish": "#ff4444",
-                                "⚪ Mixed": "#aaaaaa",
-                            },
-                            title="Most Traded Tickers by Congress",
-                        )
-                        fig_ct.update_layout(height=350, margin=dict(t=40, b=20), showlegend=True)
-                        st.plotly_chart(fig_ct, use_container_width=True)
+            with ctab2:
+                top_tickers_df = get_top_congress_tickers(congress_df)
+                if not top_tickers_df.empty:
+                    st.dataframe(top_tickers_df, use_container_width=True, hide_index=True)
 
-                with ctab3:
-                    politicians_df = get_most_active_politicians(congress_df)
-                    if not politicians_df.empty:
-                        st.dataframe(politicians_df, use_container_width=True, hide_index=True)
+                    fig_ct = px.bar(
+                        top_tickers_df.head(20),
+                        x="ticker", y="trades",
+                        color="sentiment",
+                        color_discrete_map={
+                            "🟢 Bullish": "#00cc44",
+                            "🔴 Bearish": "#ff4444",
+                            "⚪ Mixed": "#aaaaaa",
+                        },
+                        title="Most Traded Tickers by Congress (buys + sells)",
+                    )
+                    fig_ct.update_layout(height=400, margin=dict(t=40, b=20), showlegend=True)
+                    st.plotly_chart(fig_ct, use_container_width=True)
 
-            elif congress_df is not None and congress_df.empty:
-                st.info("No disclosures found for the selected period. Try increasing 'Days back'.")
-            else:
-                st.info("Click **Load Congress Trades** to fetch recent congressional disclosures.")
+            with ctab3:
+                politicians_df = get_most_active_politicians(congress_df)
+                if not politicians_df.empty:
+                    st.dataframe(politicians_df, use_container_width=True, hide_index=True)
+
+        elif congress_df is not None and congress_df.empty:
+            st.info("No disclosures found for the selected period/filters. Try increasing 'Days back'.")
+        else:
+            st.info("Click **Load Congress Trades** to fetch recent congressional disclosures.")
