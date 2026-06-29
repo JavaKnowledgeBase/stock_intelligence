@@ -332,6 +332,13 @@ with st.sidebar:
         with col_send:
             send_clicked = st.button("Send", use_container_width=True)
 
+        # Clear button — above history
+        col_clear, col_spacer = st.columns([1, 2])
+        with col_clear:
+            if st.button("Clear chat", use_container_width=True):
+                st.session_state["chat_history"] = []
+                st.rerun()
+
         # Chat history display
         chat_container = st.container(height=380)
         with chat_container:
@@ -343,13 +350,6 @@ with st.sidebar:
             for msg in st.session_state["chat_history"]:
                 with st.chat_message(msg["role"]):
                     st.markdown(msg["content"])
-
-        # Clear button
-        col_clear, col_spacer = st.columns([1, 2])
-        with col_clear:
-            if st.button("Clear chat", use_container_width=True):
-                st.session_state["chat_history"] = []
-                st.rerun()
 
         if send_clicked and user_input.strip():
             msg = user_input.strip()
