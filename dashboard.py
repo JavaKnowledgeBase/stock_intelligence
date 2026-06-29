@@ -36,6 +36,8 @@ import cache_manager as cm
 from earnings_calendar import get_earnings_calendar
 from screener_engine import SCREENER_PRESETS, FILTER_COLUMNS, run_screener
 from insider_flow import get_insider_flow
+from news_sentiment import get_news_sentiment, aggregate_sentiment
+from top_movers import get_top_movers
 import ai_assistant as ai
 
 
@@ -294,6 +296,12 @@ for state_key, default_value in [
     ("screener_fetched_at", None),
     ("insider_df", None),
     ("insider_fetched_at", None),
+    ("news_df", None),
+    ("news_agg_df", None),
+    ("news_fetched_at", None),
+    ("movers_gainers_df", None),
+    ("movers_losers_df", None),
+    ("movers_fetched_at", None),
     ("chat_history", []),
     ("chat_portfolio", ""),
     ("chat_model", ai.DEFAULT_MODEL),
@@ -965,6 +973,204 @@ def _render_insider_flow():
         st.info("Click **Run Insider Flow** to load recent Form 4 transactions.")
 
 
+def _render_news_sentiment():
+    st.markdown(
+        "Scan recent headlines across your chosen tickers and score each one as "
+        "**Bullish**, **Bearish**, or **Neutral** using keyword analysis. "
+        "Quickly spot which stocks are in positive vs negative news flow."
+    )
+
+    col_tickers, col_max, col_run = st.columns([3, 1, 1])
+    with col_tickers:
+        news_ticker_input = st.text_input(
+            "Tickers (comma-separated, or leave blank for full universe)",
+            value="",
+            placeholder="e.g. NVDA, AAPL, MSFT, TSLA",
+        )
+    with col_max:
+        headlines_per_ticker = st.slider("Headlines each", min_value=3, max_value=15, value=5)
+    with col_run:
+        st.write("")
+        run_news = st.button("Scan News", use_container_width=True)
+
+    if st.session_state["news_fetched_at"]:
+        st.caption(f"Last run: {st.session_state['news_fetched_at']}")
+
+    if run_news:
+        raw = news_ticker_input.strip()
+        scan_tickers = (
+            [t.strip().upper() for t in raw.split(",") if t.strip()]
+            if raw else MARKET_SCAN_TICKERS[:30]
+        )
+        with st.spinner(f"Fetching headlines for {len(scan_tickers)} tickers…"):
+            try:
+                news_df = get_news_sentiment(scan_tickers, max_headlines_per_ticker=headlines_per_ticker)
+                st.session_state["news_df"] = news_df
+                st.session_state["news_agg_df"] = aggregate_sentiment(news_df)
+                st.session_state["news_fetched_at"] = _now()
+            except Exception as e:
+                st.error(f"News scan failed: {e}")
+
+    news_df = st.session_state["news_df"]
+    agg_df = st.session_state["news_agg_df"]
+
+    if agg_df is not None and not agg_df.empty:
+        st.subheader("Sentiment Summary by Ticker")
+
+        def _style_agg(row):
+            styles = [""] * len(row)
+            cols = list(row.index)
+            if "overall" in cols:
+                idx = cols.index("overall")
+                if row["overall"] == "Bullish":
+                    styles[idx] = "background-color: #1a2d00; color: #88cc44; font-weight: bold"
+                elif row["overall"] == "Bearish":
+                    styles[idx] = "background-color: #2d1b1b; color: #ff6b6b; font-weight: bold"
+            return styles
+
+        agg_rename = {
+            "ticker": "Ticker", "headlines": "Headlines",
+            "avg_score": "Avg Score", "bullish": "Bullish",
+            "neutral": "Neutral", "bearish": "Bearish", "overall": "Overall",
+        }
+        st.dataframe(
+            agg_df.rename(columns=agg_rename).style.apply(_style_agg, axis=1),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        # Score bar chart
+        fig_news = px.bar(
+            agg_df,
+            x="ticker",
+            y="avg_score",
+            color="overall",
+            title="Average Sentiment Score by Ticker",
+            labels={"ticker": "Ticker", "avg_score": "Avg Score", "overall": "Sentiment"},
+            color_discrete_map={"Bullish": "#88cc44", "Neutral": "#888888", "Bearish": "#e05c5c"},
+        )
+        fig_news.add_hline(y=0, line_dash="dot", line_color="gray")
+        st.plotly_chart(fig_news, use_container_width=True)
+
+    if news_df is not None and not news_df.empty:
+        st.subheader("All Headlines")
+        sentiment_filter = st.selectbox("Filter by Sentiment", ["All", "Bullish", "Neutral", "Bearish"])
+        display_news = news_df if sentiment_filter == "All" else news_df[news_df["sentiment"] == sentiment_filter]
+
+        def _style_news(row):
+            styles = [""] * len(row)
+            cols = list(row.index)
+            if "Sentiment" in cols:
+                idx = cols.index("Sentiment")
+                if row["Sentiment"] == "Bullish":
+                    styles[idx] = "background-color: #1a2d00; color: #88cc44"
+                elif row["Sentiment"] == "Bearish":
+                    styles[idx] = "background-color: #2d1b1b; color: #ff6b6b"
+            return styles
+
+        news_rename = {
+            "ticker": "Ticker", "date": "Date", "title": "Headline",
+            "source": "Source", "score": "Score", "sentiment": "Sentiment",
+        }
+        cols_to_show = [c for c in ["ticker", "date", "title", "source", "score", "sentiment"] if c in display_news.columns]
+        st.dataframe(
+            display_news[cols_to_show].rename(columns=news_rename).style.apply(_style_news, axis=1),
+            use_container_width=True,
+            hide_index=True,
+        )
+        st.caption(
+            "Sentiment scored by counting bullish vs bearish keywords in the headline. "
+            "Score +1 = all bullish words, -1 = all bearish, 0 = mixed or neutral. "
+            "Headlines via Finviz. Not a substitute for reading the full article."
+        )
+
+    elif news_df is None:
+        st.info("Enter tickers (or leave blank for top 30 of universe) and click **Scan News**.")
+
+
+def _render_top_movers():
+    st.markdown(
+        "Today's biggest **price movers** across the ticker universe — "
+        "ranked by percentage change from yesterday's close."
+    )
+
+    col_run, col_n, col_info = st.columns([1, 1, 2])
+    with col_run:
+        run_movers = st.button("Refresh Movers", use_container_width=True)
+    with col_n:
+        top_n = st.slider("Top N", min_value=5, max_value=25, value=10)
+    with col_info:
+        if st.session_state["movers_fetched_at"]:
+            st.caption(f"Last run: {st.session_state['movers_fetched_at']}")
+
+    if run_movers:
+        with st.spinner(f"Fetching price data for {len(MARKET_SCAN_TICKERS)} tickers…"):
+            try:
+                gainers, losers = get_top_movers(MARKET_SCAN_TICKERS, top_n=top_n)
+                st.session_state["movers_gainers_df"] = gainers
+                st.session_state["movers_losers_df"] = losers
+                st.session_state["movers_fetched_at"] = _now()
+            except Exception as e:
+                st.error(f"Top movers failed: {e}")
+
+    gainers = st.session_state["movers_gainers_df"]
+    losers = st.session_state["movers_losers_df"]
+
+    _movers_rename = {
+        "ticker": "Ticker", "price": "Price", "prev_close": "Prev Close",
+        "change_pct": "Change %", "volume": "Avg 3M Vol",
+    }
+
+    if gainers is not None and not gainers.empty:
+        col_g, col_l = st.columns(2)
+
+        with col_g:
+            st.subheader("🟢 Top Gainers")
+            st.dataframe(
+                gainers.head(top_n).rename(columns=_movers_rename),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+        with col_l:
+            st.subheader("🔴 Top Losers")
+            if losers is not None and not losers.empty:
+                st.dataframe(
+                    losers.head(top_n).rename(columns=_movers_rename),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+        # Combined bar chart
+        if gainers is not None and losers is not None:
+            top_g = gainers.head(10).copy()
+            top_l = losers.head(10).copy()
+            chart_df = pd.concat([top_g, top_l]).sort_values("change_pct", ascending=False)
+            fig_mov = px.bar(
+                chart_df,
+                x="ticker",
+                y="change_pct",
+                color="change_pct",
+                color_continuous_scale="RdYlGn",
+                color_continuous_midpoint=0,
+                title="Today's Top Movers — % Change",
+                labels={"ticker": "Ticker", "change_pct": "% Change"},
+                text="change_pct",
+            )
+            fig_mov.update_traces(texttemplate="%{text:+.2f}%", textposition="outside")
+            fig_mov.add_hline(y=0, line_dash="dot", line_color="gray")
+            fig_mov.update_layout(coloraxis_showscale=False)
+            st.plotly_chart(fig_mov, use_container_width=True)
+
+        st.caption(
+            "% change calculated from previous close via yfinance fast_info. "
+            "Data may lag intraday by a few minutes. Run again to refresh."
+        )
+
+    elif gainers is None:
+        st.info("Click **Refresh Movers** to load today's price movements.")
+
+
 # =========================
 # MODE GATE — welcome screen or tabs
 # =========================
@@ -986,6 +1192,8 @@ if st.session_state["trader_mode"] is None:
             "- **Earnings Calendar** — upcoming events with IV context\n"
             "- **Market Screener** — filter by RSI, momentum, MA alignment\n"
             "- **Insider Flow** — Form 4 SEC filings (C-suite buys & sells)\n"
+            "- **News Sentiment** — bullish/bearish headline scanner\n"
+            "- **Top Movers** — today's biggest gainers & losers\n"
         )
         st.write("")
         if st.button("I trade Stocks →", use_container_width=True, type="primary"):
@@ -1013,11 +1221,13 @@ if st.session_state["trader_mode"] is None:
 
 elif st.session_state["trader_mode"] == "stocks":
 
-    stab1, stab2, stab3, stab4 = st.tabs([
+    stab1, stab2, stab3, stab4, stab5, stab6 = st.tabs([
         "Ticker\nAnalysis",
         "Earnings\nCalendar",
         "Market\nScreener",
         "Insider\nFlow",
+        "News\nSentiment",
+        "Top\nMovers",
     ])
 
     with stab1:
@@ -1031,6 +1241,12 @@ elif st.session_state["trader_mode"] == "stocks":
 
     with stab4:
         _render_insider_flow()
+
+    with stab5:
+        _render_news_sentiment()
+
+    with stab6:
+        _render_top_movers()
 
 
 # =========================
