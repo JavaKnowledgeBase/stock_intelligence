@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 Created on Mon Mar  2 06:54:23 2026
 
@@ -1293,12 +1293,11 @@ if st.session_state["trader_mode"] is None:
 
 elif st.session_state["trader_mode"] == "stocks":
 
-    stab1, stab2, stab3, stab4, stab5, stab6, stab7, stab8, stab9, stab10, stab11 = st.tabs([
+    stab1, stab2, stab3, stab4, stab5, stab6, stab7, stab8, stab9, stab10 = st.tabs([
         "Ticker\nAnalysis",
         "Earnings\nCalendar",
         "Market\nScreener",
         "Insider\nFlow",
-        "News\nSentiment",
         "Top\nMovers",
         "Hedge Fund\n13F",
         "Macro\nDashboard",
@@ -1320,13 +1319,10 @@ elif st.session_state["trader_mode"] == "stocks":
         _render_insider_flow()
 
     with stab5:
-        _render_news_sentiment()
-
-    with stab6:
         _render_top_movers()
 
     # ── HEDGE FUND 13F ────────────────────────────────────────────────────────
-    with stab7:
+    with stab6:
         st.markdown(
             "**Hedge Fund 13F Holdings Tracker** — quarterly portfolio disclosures "
             "filed with the SEC by institutions managing >$100M in equities. "
@@ -1477,7 +1473,7 @@ elif st.session_state["trader_mode"] == "stocks":
 
 
     # ── MACRO DASHBOARD ───────────────────────────────────────────────────────
-    with stab8:
+    with stab7:
         st.markdown(
             "**Macro Economic Dashboard** — key indicators from official government sources. "
             "Data: [FRED](https://fred.stlouisfed.org) (Federal Reserve St. Louis) · "
@@ -1621,7 +1617,7 @@ elif st.session_state["trader_mode"] == "stocks":
 
 
     # ── EARNINGS ANALYTICS ────────────────────────────────────────────────────
-    with stab9:
+    with stab8:
         st.markdown(
             "**Earnings Surprise Analytics** — pre-earnings intelligence: options-implied move, "
             "historical beat rate, post-earnings price history, IV rank, and strategy tips. "
@@ -1816,7 +1812,7 @@ elif st.session_state["trader_mode"] == "stocks":
 
 
     # ── SECTOR ROTATION ───────────────────────────────────────────────────────
-    with stab10:
+    with stab9:
         st.markdown(
             "**Sector Rotation Tracker** — monitors money flows across all 11 S&P 500 sector ETFs. "
             "Leading sectors show where institutional money is moving. "
@@ -1899,7 +1895,7 @@ elif st.session_state["trader_mode"] == "stocks":
 
 
     # ── AI TRADE THESIS ───────────────────────────────────────────────────────
-    with stab11:
+    with stab10:
         st.markdown(
             "**AI Trade Thesis Generator** — one-click synthesis of all platform data "
             "into a structured, actionable trade brief. Powered by Claude AI.\n\n"
@@ -1965,16 +1961,13 @@ elif st.session_state["trader_mode"] == "stocks":
 
 elif st.session_state["trader_mode"] == "options":
 
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs([
         "Options\nScreener",
         "Volume\nLeaders",
-        "Rapid\nMovers",
         "Strategy\nIdeas",
         "Chain\nExplorer",
         "Price\nForecast",
         "Short\nSqueeze",
-        "Intraday\nTiming",
-        "Ticker\nAnalysis",
         "Unusual\nFlow",
         "GEX\nHeatmap",
         "Congress\nTrades",
@@ -2131,65 +2124,10 @@ elif st.session_state["trader_mode"] == "options":
 
 
     # =========================
-    # RAPID MOVERS
-    # =========================
-
-    with tab3:
-
-        col_run, col_info = st.columns([1, 4])
-        with col_run:
-            run_market_movers = st.button("Run Rapid Movers", use_container_width=True)
-        with col_info:
-            if st.session_state["market_movers_fetched_at"]:
-                st.caption(f"Last run: {st.session_state['market_movers_fetched_at']}")
-
-        movers_row_count = st.slider("Mover Rows", min_value=10, max_value=20, value=10)
-
-        if run_market_movers:
-            cached = cm.load("market_movers")
-            if cached:
-                st.session_state["market_movers_df"] = pd.DataFrame(cached)
-                st.session_state["market_movers_fetched_at"] = f"cached · {cm.age_label('market_movers')}"
-            else:
-                _prog = st.progress(0, text=f"Bulk downloading price data for {len(MARKET_SCAN_TICKERS)} tickers… (~3-5s)")
-                try:
-                    import data_fetcher as _df
-                    _df.bulk_preload(MARKET_SCAN_TICKERS, period="1y")
-                    _prog.progress(40, text="Price data ready — identifying rapid movers with 50 workers…")
-                    result = build_market_movers_table(MARKET_SCAN_TICKERS)
-                    _prog.progress(100, text="Done!")
-                    _prog.empty()
-                    st.session_state["market_movers_df"] = result
-                    st.session_state["market_movers_fetched_at"] = _now()
-                    if result is not None and not result.empty:
-                        cm.save("market_movers", result.to_dict("records"))
-                except Exception as e:
-                    _prog.empty()
-                    st.error(f"Failed to load movers data: {e}")
-
-        movers_df = st.session_state["market_movers_df"]
-
-        if movers_df is not None and not movers_df.empty:
-            st.dataframe(
-                format_market_movers_table(movers_df.head(movers_row_count)),
-                use_container_width=True,
-                hide_index=True,
-            )
-            st.caption(
-                "Free-data daily candidates, recalculated from fresh price, range, momentum, "
-                "and volume behavior across the scanned market universe."
-            )
-        elif movers_df is not None:
-            st.warning("No rapid mover candidates were returned.")
-        else:
-            st.info("Click Run to scan for movers.")
-
-
-    # =========================
     # STRATEGY TABLE
     # =========================
 
-    with tab4:
+    with tab3:
 
         col_run, col_info = st.columns([1, 4])
         with col_run:
@@ -2371,7 +2309,7 @@ elif st.session_state["trader_mode"] == "options":
     # OPTIONS CHAIN EXPLORER
     # =========================
 
-    with tab5:
+    with tab4:
 
         col_run, col_info = st.columns([1, 4])
         with col_run:
@@ -2434,7 +2372,7 @@ elif st.session_state["trader_mode"] == "options":
     # PRICE FORECAST
     # =========================
 
-    with tab6:
+    with tab5:
 
         col_run, col_info = st.columns([1, 4])
         with col_run:
@@ -2518,7 +2456,7 @@ elif st.session_state["trader_mode"] == "options":
     # SHORT SQUEEZE SCANNER
     # =========================
 
-    with tab7:
+    with tab6:
 
         col_run, col_info = st.columns([1, 4])
         with col_run:
@@ -2649,185 +2587,10 @@ elif st.session_state["trader_mode"] == "options":
 
 
     # =========================
-    # INTRADAY TIMING
-    # =========================
-
-    with tab8:
-
-        st.markdown(
-            "Estimates optimal **buy and sell windows** for each ticker based on 60 days of "
-            "5-minute historical data. Shows average slot returns, volume profile, gap behaviour, "
-            "and a plain-English recommendation per ticker. Data is cached for 4 hours."
-        )
-
-        col_run, col_info = st.columns([1, 4])
-        with col_run:
-            run_timing = st.button("Run Intraday Timing", use_container_width=True)
-        with col_info:
-            if st.session_state["timing_fetched_at"]:
-                st.caption(f"Last run: {st.session_state['timing_fetched_at']}")
-
-        col_t1, col_t2 = st.columns(2)
-        with col_t1:
-            timing_tickers_input = st.text_input(
-                "Tickers (comma-separated, or leave blank to use Market Universe)",
-                value="",
-                placeholder="e.g. AAPL, NVDA, TSLA",
-            )
-        with col_t2:
-            timing_contract = st.selectbox("Direction", ["call", "put", "both"], index=0)
-
-        if run_timing:
-            raw_input = timing_tickers_input.strip()
-            if raw_input:
-                timing_ticker_list = [t.strip().upper() for t in raw_input.split(",") if t.strip()]
-            else:
-                timing_ticker_list = MARKET_SCAN_TICKERS
-
-            if timing_contract == "both":
-                pairs = [(t, "call") for t in timing_ticker_list] + [(t, "put") for t in timing_ticker_list]
-            else:
-                pairs = [(t, timing_contract) for t in timing_ticker_list]
-
-            st.session_state["timing_results"] = None
-            with st.spinner(f"Analysing {len(timing_ticker_list)} tickers × {'2 directions' if timing_contract == 'both' else '1 direction'}…"):
-                results = get_intraday_timing_batch(pairs, workers=6)
-                st.session_state["timing_results"] = results
-                st.session_state["timing_fetched_at"] = _now()
-
-        timing_results = st.session_state["timing_results"]
-
-        if timing_results:
-            summary_rows = []
-            for (ticker, ct), data in sorted(timing_results.items()):
-                if data.get("error"):
-                    continue
-                summary_rows.append({
-                    "Ticker": ticker,
-                    "Direction": ct.upper(),
-                    "Best Entry": data["best_entry_window"],
-                    "Best Exit": data["best_exit_window"],
-                    "Gap Fade %": f"{data['gap_fade_prob']:.0f}%" if data["gap_fade_prob"] is not None else "—",
-                    "Days Analysed": data["n_days"],
-                })
-
-            if summary_rows:
-                st.subheader("Summary — Optimal Windows")
-                st.dataframe(
-                    pd.DataFrame(summary_rows),
-                    use_container_width=True,
-                    hide_index=True,
-                )
-
-            st.subheader("Ticker Detail — Volume Profile & Slot Returns")
-
-            seen = set()
-            for (ticker, ct), data in sorted(timing_results.items()):
-                card_key = f"{ticker}_{ct}"
-                if card_key in seen:
-                    continue
-                seen.add(card_key)
-
-                if data.get("error"):
-                    with st.expander(f"{ticker} ({ct.upper()}) — ⚠️ {data['error']}"):
-                        st.warning(data["error"])
-                    continue
-
-                entry_w = data["best_entry_window"]
-                exit_w = data["best_exit_window"]
-                n_days = data["n_days"]
-
-                with st.expander(
-                    f"{ticker} ({ct.upper()}) — Entry: {entry_w}  |  Exit: {exit_w}  |  {n_days}d history"
-                ):
-                    st.markdown("**Recommendation**")
-                    st.info(data["timing_note"])
-
-                    slot_df = pd.DataFrame({
-                        "Time Slot": TIMING_SLOT_LABELS,
-                        "Avg Return %": data["avg_return_by_slot"],
-                        "Win Rate %": data["win_rate_by_slot"],
-                        "Vol vs Avg": data["volume_profile"],
-                    })
-                    slot_df["Avg Return %"] = slot_df["Avg Return %"].round(3)
-                    slot_df["Win Rate %"] = slot_df["Win Rate %"].round(1)
-                    slot_df["Vol vs Avg"] = slot_df["Vol vs Avg"].round(2)
-
-                    entry_label = data["best_entry_window"]
-                    exit_label = data["best_exit_window"]
-
-                    def _highlight_slots(row):
-                        if row["Time Slot"] == entry_label:
-                            return ["background-color: #1a472a; color: white"] * len(row)
-                        if row["Time Slot"] == exit_label:
-                            return ["background-color: #1a3a5c; color: white"] * len(row)
-                        return [""] * len(row)
-
-                    st.dataframe(
-                        slot_df.style.apply(_highlight_slots, axis=1),
-                        use_container_width=True,
-                        hide_index=True,
-                    )
-
-                    fig_vol = px.bar(
-                        slot_df,
-                        x="Time Slot",
-                        y="Vol vs Avg",
-                        title=f"{ticker} — Volume Profile (vs daily avg)",
-                        color="Vol vs Avg",
-                        color_continuous_scale="Blues",
-                    )
-                    fig_vol.update_layout(
-                        xaxis_tickangle=-45,
-                        coloraxis_showscale=False,
-                        height=300,
-                        margin=dict(t=40, b=80),
-                    )
-                    fig_vol.add_hline(y=1.0, line_dash="dot", line_color="gray",
-                                      annotation_text="Avg", annotation_position="top right")
-                    st.plotly_chart(fig_vol, use_container_width=True)
-
-                    fig_ret = px.bar(
-                        slot_df,
-                        x="Time Slot",
-                        y="Avg Return %",
-                        title=f"{ticker} ({ct.upper()}) — Avg Slot Return over {n_days} days",
-                        color="Avg Return %",
-                        color_continuous_scale="RdYlGn",
-                        color_continuous_midpoint=0,
-                    )
-                    fig_ret.update_layout(
-                        xaxis_tickangle=-45,
-                        coloraxis_showscale=False,
-                        height=300,
-                        margin=dict(t=40, b=80),
-                    )
-                    fig_ret.add_hline(y=0, line_dash="dot", line_color="gray")
-                    st.plotly_chart(fig_ret, use_container_width=True)
-
-            st.caption(
-                "Based on 60 days of 5-min yfinance data. Slot returns are averages — "
-                "actual performance varies. Gap fade probability is computed from days where the "
-                "opening gap was ≥0.5% vs prior close. Green row = suggested entry, blue = suggested exit."
-            )
-
-        else:
-            st.info("Enter tickers (or leave blank for market universe) and click **Run Intraday Timing**.")
-
-
-    # =========================
-    # TICKER ANALYSIS
-    # =========================
-
-    with tab9:
-        _render_ticker_analysis()
-
-
-    # =========================
     # UNUSUAL OPTIONS FLOW
     # =========================
 
-    with tab10:
+    with tab7:
         st.markdown(
             "Scans the options universe for **unusual flow signals**: "
             "volume spikes vs open interest (new money), large notional prints, "
@@ -2923,7 +2686,7 @@ elif st.session_state["trader_mode"] == "options":
     # GEX HEATMAP
     # =========================
 
-    with tab11:
+    with tab8:
         st.markdown(
             "**Gamma Exposure (GEX) Heatmap** — shows where market makers (dealers) are "
             "concentrated by strike. Positive GEX = dealers are long gamma (stabilising). "
@@ -3039,7 +2802,7 @@ elif st.session_state["trader_mode"] == "options":
     # CONGRESS TRADES
     # =========================
 
-    with tab12:
+    with tab9:
         st.markdown(
             "**Congressional Trade Tracker** — STOCK Act disclosures from U.S. senators and "
             "representatives. Data sourced from official government filings via "
@@ -3131,7 +2894,7 @@ elif st.session_state["trader_mode"] == "options":
     # PUT/CALL SENTIMENT
     # =========================
 
-    with tab13:
+    with tab10:
         st.markdown(
             "**Put/Call Ratio Scanner** — scans the options universe for sentiment extremes. "
             "High P/C (≥1.5) = heavy put buying / bearish fear — contrarian bulls watch here. "
