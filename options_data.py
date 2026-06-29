@@ -96,7 +96,7 @@ def _flatten_df_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 _CACHE_LOCK = threading.Lock()
 _CACHE = {}
-_MAX_WORKERS = 8
+_MAX_WORKERS = 50
 
 
 def _is_rate_limited_error(exc):
@@ -174,6 +174,14 @@ def get_price_history(ticker, period="6mo", interval="1d"):
     if cached is not None:
         return _clone_frame(cached)
 
+    # Check bulk price cache first (populated by data_fetcher.bulk_preload)
+    if interval == "1d":
+        import data_fetcher as _df
+        bulk = _df.get(ticker, period=period)
+        if bulk is not None and not bulk.empty:
+            _set_cached(key, bulk.copy())
+            return bulk
+
     # Try Polygon first (better reliability, real-time on paid tier)
     if _polygon.available() and interval == "1d":
         _period_days = {
@@ -186,7 +194,7 @@ def get_price_history(ticker, period="6mo", interval="1d"):
             _set_cached(key, poly_df.copy())
             return poly_df
 
-    # Fallback: yfinance
+    # Fallback: individual yfinance
     tk = _get_ticker(ticker)
     history = tk.history(period=period, interval=interval, auto_adjust=False)
     if history is None:
@@ -699,8 +707,13 @@ def _build_mover_row_inner(ticker):
 
 
 def build_market_movers_table(tickers):
-    rows = []
+    # Pre-load all price history in ONE bulk call before spawning workers.
+    # Workers then read from the in-memory cache (0 ms) instead of
+    # making 474 individual network requests.
+    import data_fetcher as _df
+    _df.bulk_preload(tickers, period="1y")
 
+    rows = []
     with ThreadPoolExecutor(max_workers=min(_MAX_WORKERS, len(tickers) or 1)) as pool:
         futures = [pool.submit(_build_mover_row, ticker) for ticker in tickers]
         for future in as_completed(futures):

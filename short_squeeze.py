@@ -72,9 +72,9 @@ def _fetch_ticker_data(ticker: str) -> dict | None:
         else:
             short_float_pct = _finviz_short_float(ticker) or 0.0
 
-        # Price history for momentum / volume
-        hist = yf.download(ticker, period="3mo", interval="1d",
-                           progress=False, auto_adjust=True, threads=False)
+        # Price history — read from bulk cache (0 ms) or fall back to individual fetch
+        import data_fetcher as _df
+        hist = _df.get(ticker, period="3mo")
         if hist is None or len(hist) < 22:
             return None
 
@@ -322,7 +322,7 @@ def _derive_buy_timing(row: dict, rsi: float, score: float) -> str:
 # ---------------------------------------------------------------------------
 
 def scan_short_squeeze(tickers: list[str], min_short_float: float = 8.0,
-                       workers: int = 12) -> pd.DataFrame:
+                       workers: int = 50) -> pd.DataFrame:
     """
     Scan a list of tickers and return a ranked short squeeze candidate table.
 
@@ -336,8 +336,11 @@ def scan_short_squeeze(tickers: list[str], min_short_float: float = 8.0,
     -------
     pd.DataFrame sorted by squeeze_score descending
     """
-    rows = []
+    # Pre-load all price history in one bulk call — workers read from cache (0 ms)
+    import data_fetcher as _df
+    _df.bulk_preload(tickers, period="3mo")
 
+    rows = []
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {pool.submit(_fetch_ticker_data, t): t for t in tickers}
         for future in as_completed(futures):

@@ -5,6 +5,8 @@ Created on Mon Mar  2 06:54:23 2026
 @author: rkafl
 """
 
+import ssl_fix  # must be first — patches CURL_CA_BUNDLE for yfinance + all HTTPS
+
 import concurrent.futures
 import os
 import subprocess
@@ -30,6 +32,11 @@ from r2_storage import ensure_assets_available
 from short_squeeze import scan_short_squeeze
 from timing_engine import get_intraday_timing_batch, _SLOT_LABELS as TIMING_SLOT_LABELS
 from ticker_analysis import analyse_ticker
+import cache_manager as cm
+from earnings_calendar import get_earnings_calendar
+from screener_engine import SCREENER_PRESETS, FILTER_COLUMNS, run_screener
+from insider_flow import get_insider_flow
+import ai_assistant as ai
 
 
 ensure_assets_available()
@@ -266,12 +273,128 @@ for state_key, default_value in [
     ("analysis_result", None),
     ("analysis_ticker", None),
     ("analysis_fetched_at", None),
+    ("earnings_df", None),
+    ("earnings_fetched_at", None),
+    ("screener_df", None),
+    ("screener_fetched_at", None),
+    ("insider_df", None),
+    ("insider_fetched_at", None),
+    ("chat_history", []),
+    ("chat_portfolio", ""),
+    ("chat_model", ai.DEFAULT_MODEL),
 ]:
+
     if state_key not in st.session_state:
         st.session_state[state_key] = default_value
 
 
-tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
+# =========================
+# AI ASSISTANT SIDEBAR
+# =========================
+
+with st.sidebar:
+    st.markdown("## 🤖 AI Assistant")
+    st.caption("Ask questions about any analysis loaded in the app.")
+
+    if not ai.is_available():
+        st.warning(ai.missing_key_message())
+    else:
+        # Model selector
+        st.session_state["chat_model"] = st.selectbox(
+            "Model",
+            list(ai.MODELS.keys()),
+            index=list(ai.MODELS.keys()).index(st.session_state["chat_model"]),
+            key="chat_model_select",
+        )
+
+        # Portfolio / watchlist input
+        with st.expander("My Portfolio / Watchlist (optional)", expanded=False):
+            portfolio_input = st.text_area(
+                "Paste your holdings (e.g. 100 NVDA @ $110, 50 TSLA @ $240)",
+                value=st.session_state["chat_portfolio"],
+                height=120,
+                placeholder="100 NVDA @ $110\n50 TSLA @ $240\n200 SPY @ $520",
+                key="portfolio_text_area",
+            )
+            if portfolio_input != st.session_state["chat_portfolio"]:
+                st.session_state["chat_portfolio"] = portfolio_input
+
+        # Chat history display
+        chat_container = st.container(height=420)
+        with chat_container:
+            if not st.session_state["chat_history"]:
+                st.markdown(
+                    "_No messages yet. Run any scan in the main tabs, "
+                    "then ask me about the results._"
+                )
+            for msg in st.session_state["chat_history"]:
+                with st.chat_message(msg["role"]):
+                    st.markdown(msg["content"])
+
+        # Clear button
+        col_clear, col_spacer = st.columns([1, 2])
+        with col_clear:
+            if st.button("Clear chat", use_container_width=True):
+                st.session_state["chat_history"] = []
+                st.rerun()
+
+        # Chat input — text_input + button works reliably in sidebar
+        col_msg, col_send = st.columns([4, 1])
+        with col_msg:
+            user_input = st.text_input(
+                "Message",
+                value="",
+                placeholder="Ask about any analysis…",
+                label_visibility="collapsed",
+                key="chat_input_box",
+            )
+        with col_send:
+            send_clicked = st.button("Send", use_container_width=True)
+
+        if send_clicked and user_input.strip():
+            msg = user_input.strip()
+            # Append user message
+            st.session_state["chat_history"].append(
+                {"role": "user", "content": msg}
+            )
+
+            # Build context from live session data
+            context = ai.build_context(
+                st.session_state,
+                portfolio_text=st.session_state["chat_portfolio"],
+            )
+
+            # Stream response
+            with chat_container:
+                with st.chat_message("assistant"):
+                    response_placeholder = st.empty()
+                    full_response = ""
+                    for chunk in ai.stream_response(
+                        st.session_state["chat_history"],
+                        context,
+                        model_label=st.session_state["chat_model"],
+                    ):
+                        full_response += chunk
+                        response_placeholder.markdown(full_response + "▌")
+                    response_placeholder.markdown(full_response)
+
+            st.session_state["chat_history"].append(
+                {"role": "assistant", "content": full_response}
+            )
+            st.rerun()
+
+    st.divider()
+    st.caption("**Platform:** Institutional Options Intelligence v2.0")
+    st.caption("**Data:** yfinance · Finviz · SEC EDGAR · Polygon.io")
+    if st.button("⚙️ About", use_container_width=True):
+        st.info(
+            "This platform provides institutional-grade options analysis for retail traders. "
+            "All data is for research purposes only — not financial advice. "
+            "Past signals do not guarantee future results."
+        )
+
+
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12 = st.tabs([
     "Market Options Screener",
     "Market Volume Leaders",
     "Rapid Movers",
@@ -281,6 +404,9 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
     "Short Squeeze Scanner",
     "Intraday Timing",
     "Ticker Analysis",
+    "Earnings Calendar",
+    "Market Screener",
+    "Insider Flow",
 ])
 
 
@@ -394,12 +520,25 @@ with tab2:
     volume_leaders_count = st.slider("Volume Leaders Rows", min_value=10, max_value=50, value=20)
 
     if run_market_volume:
-        with st.spinner(f"Scanning {len(MARKET_SCAN_TICKERS)} tickers..."):
+        cached = cm.load("market_volume")
+        if cached:
+            st.session_state["market_volume_df"] = pd.DataFrame(cached)
+            st.session_state["market_volume_fetched_at"] = f"cached · {cm.age_label('market_volume')}"
+        else:
+            _prog = st.progress(0, text=f"Bulk downloading price data for {len(MARKET_SCAN_TICKERS)} tickers… (~3-5s)")
             try:
+                import data_fetcher as _df
+                _df.bulk_preload(MARKET_SCAN_TICKERS, period="1y")
+                _prog.progress(40, text="Price data ready — scanning volume leaders with 50 workers…")
                 result = build_market_volume_table(MARKET_SCAN_TICKERS)
+                _prog.progress(100, text="Done!")
+                _prog.empty()
                 st.session_state["market_volume_df"] = result
                 st.session_state["market_volume_fetched_at"] = _now()
+                if result is not None and not result.empty:
+                    cm.save("market_volume", result.to_dict("records"))
             except Exception as e:
+                _prog.empty()
                 st.error(f"Failed to load volume data: {e}")
 
     market_volume_df = st.session_state["market_volume_df"]
@@ -437,12 +576,25 @@ with tab3:
     movers_row_count = st.slider("Mover Rows", min_value=10, max_value=20, value=10)
 
     if run_market_movers:
-        with st.spinner(f"Scanning {len(MARKET_SCAN_TICKERS)} tickers for rapid move candidates..."):
+        cached = cm.load("market_movers")
+        if cached:
+            st.session_state["market_movers_df"] = pd.DataFrame(cached)
+            st.session_state["market_movers_fetched_at"] = f"cached · {cm.age_label('market_movers')}"
+        else:
+            _prog = st.progress(0, text=f"Bulk downloading price data for {len(MARKET_SCAN_TICKERS)} tickers… (~3-5s)")
             try:
+                import data_fetcher as _df
+                _df.bulk_preload(MARKET_SCAN_TICKERS, period="1y")
+                _prog.progress(40, text="Price data ready — identifying rapid movers with 50 workers…")
                 result = build_market_movers_table(MARKET_SCAN_TICKERS)
+                _prog.progress(100, text="Done!")
+                _prog.empty()
                 st.session_state["market_movers_df"] = result
                 st.session_state["market_movers_fetched_at"] = _now()
+                if result is not None and not result.empty:
+                    cm.save("market_movers", result.to_dict("records"))
             except Exception as e:
+                _prog.empty()
                 st.error(f"Failed to load movers data: {e}")
 
     movers_df = st.session_state["market_movers_df"]
@@ -482,19 +634,35 @@ with tab4:
         st.session_state["strategy_df"] = None
         st.session_state["strategy_diagnostics"] = None
 
-        with st.spinner("Building strategy ideas from the latest market signals..."):
+        cached_strat = cm.load("strategy")
+        cached_diag = cm.load("strategy_diagnostics")
+        if cached_strat and cached_diag:
+            st.session_state["strategy_df"] = pd.DataFrame(cached_strat)
+            st.session_state["strategy_diagnostics"] = cached_diag
+            st.session_state["strategy_fetched_at"] = f"cached · {cm.age_label('strategy')}"
+        else:
+            _prog = st.progress(0, text=f"Bulk downloading price data for {len(MARKET_SCAN_TICKERS)} tickers… (~3-5s)")
             try:
+                import data_fetcher as _df
+                _df.bulk_preload(MARKET_SCAN_TICKERS, period="1y")
+                _prog.progress(40, text="Price data ready — building strategy signals with 50 workers…")
                 strategy_df, strategy_diagnostics = build_strategy_table(
                     MARKET_SCAN_TICKERS,
                     top_n=strategy_row_count,
                 )
+                _prog.progress(100, text="Done!")
+                _prog.empty()
                 st.session_state["strategy_diagnostics"] = strategy_diagnostics
                 st.session_state["strategy_df"] = (
                     pd.DataFrame() if strategy_diagnostics["status"] == "data_unavailable"
                     else strategy_df
                 )
                 st.session_state["strategy_fetched_at"] = _now()
+                if strategy_df is not None and not strategy_df.empty:
+                    cm.save("strategy", strategy_df.to_dict("records"))
+                    cm.save("strategy_diagnostics", strategy_diagnostics)
             except Exception as e:
+                _prog.empty()
                 st.warning(f"Strategy scan encountered an error: {e}. Showing any partial results.")
 
     strategy_df = st.session_state["strategy_df"]
@@ -709,13 +877,30 @@ with tab6:
             st.caption(f"Last run: {st.session_state['forecast_fetched_at']}")
 
     if run_forecast:
-        with st.spinner("Scanning tickers and computing forecasts..."):
+        cached_g = cm.load("forecast_gainers")
+        cached_l = cm.load("forecast_losers")
+        if cached_g and cached_l:
+            st.session_state["forecast_gainers_df"] = pd.DataFrame(cached_g)
+            st.session_state["forecast_losers_df"] = pd.DataFrame(cached_l)
+            st.session_state["forecast_fetched_at"] = f"cached · {cm.age_label('forecast_gainers')}"
+        else:
+            _prog = st.progress(0, text=f"Bulk downloading price data for {len(MARKET_SCAN_TICKERS)} tickers… (~3-5s)")
             try:
+                import data_fetcher as _df
+                _df.bulk_preload(MARKET_SCAN_TICKERS, period="1y")
+                _prog.progress(40, text="Price data ready — computing ML forecasts…")
                 gainers, losers = build_price_forecast_table(MARKET_SCAN_TICKERS, top_n=10)
+                _prog.progress(100, text="Done!")
+                _prog.empty()
                 st.session_state["forecast_gainers_df"] = gainers
                 st.session_state["forecast_losers_df"] = losers
                 st.session_state["forecast_fetched_at"] = _now()
+                if gainers is not None and not gainers.empty:
+                    cm.save("forecast_gainers", gainers.to_dict("records"))
+                if losers is not None and not losers.empty:
+                    cm.save("forecast_losers", losers.to_dict("records"))
             except Exception as e:
+                _prog.empty()
                 st.warning(f"Forecast encountered an error: {e}. Showing any partial results.")
 
     gainers_df = st.session_state["forecast_gainers_df"]
@@ -792,16 +977,22 @@ with tab7:
 
     if run_squeeze:
         st.session_state["squeeze_df"] = None
-        with st.spinner(f"Scanning {len(MARKET_SCAN_TICKERS)} tickers for squeeze setups…"):
-            try:
-                squeeze_df = scan_short_squeeze(
-                    MARKET_SCAN_TICKERS,
-                    min_short_float=min_short_float,
-                )
-                st.session_state["squeeze_df"] = squeeze_df
-                st.session_state["squeeze_fetched_at"] = _now()
-            except Exception as e:
-                st.error(f"Squeeze scan failed: {e}")
+        _prog = st.progress(0, text=f"Bulk downloading 3-month price data for {len(MARKET_SCAN_TICKERS)} tickers… (~3-5s)")
+        try:
+            import data_fetcher as _df
+            _df.bulk_preload(MARKET_SCAN_TICKERS, period="3mo")
+            _prog.progress(40, text="Price data ready — fetching short interest & scoring squeeze candidates…")
+            squeeze_df = scan_short_squeeze(
+                MARKET_SCAN_TICKERS,
+                min_short_float=min_short_float,
+            )
+            _prog.progress(100, text="Done!")
+            _prog.empty()
+            st.session_state["squeeze_df"] = squeeze_df
+            st.session_state["squeeze_fetched_at"] = _now()
+        except Exception as e:
+            _prog.empty()
+            st.error(f"Squeeze scan failed: {e}")
 
     squeeze_df = st.session_state["squeeze_df"]
 
@@ -1258,4 +1449,387 @@ with tab9:
 
     else:
         st.info("Enter a ticker symbol above and click **Run Full Analysis**.")
+
+
+# =========================
+# EARNINGS CALENDAR
+# =========================
+
+with tab10:
+
+    st.markdown(
+        "Upcoming earnings events with **Implied Volatility context** — "
+        "IV/HV ratio ≥ 1.25 means options are pricing in a bigger move than historical volatility suggests. "
+        "Great for finding elevated-premium setups before announcements."
+    )
+
+    col_run, col_info, col_days = st.columns([1, 2, 1])
+    with col_run:
+        run_earnings = st.button("Run Earnings Calendar", use_container_width=True)
+    with col_info:
+        if st.session_state["earnings_fetched_at"]:
+            st.caption(f"Last run: {st.session_state['earnings_fetched_at']}")
+    with col_days:
+        earnings_days_ahead = st.slider("Days Ahead", min_value=7, max_value=60, value=30)
+
+    if run_earnings:
+        cached_earn = cm.load("earnings_calendar")
+        if cached_earn:
+            st.session_state["earnings_df"] = pd.DataFrame(cached_earn)
+            st.session_state["earnings_fetched_at"] = f"cached · {cm.age_label('earnings_calendar')}"
+        else:
+            with st.spinner(f"Fetching earnings dates for {len(MARKET_SCAN_TICKERS)} tickers..."):
+                try:
+                    earn_df = get_earnings_calendar(
+                        MARKET_SCAN_TICKERS, max_days_ahead=earnings_days_ahead
+                    )
+                    st.session_state["earnings_df"] = earn_df
+                    st.session_state["earnings_fetched_at"] = _now()
+                    if earn_df is not None and not earn_df.empty:
+                        cm.save("earnings_calendar", earn_df.to_dict("records"), ttl_seconds=3600)
+                except Exception as e:
+                    st.error(f"Earnings calendar failed: {e}")
+
+    earnings_df = st.session_state["earnings_df"]
+
+    if earnings_df is not None and not earnings_df.empty:
+        # Apply days-ahead filter dynamically
+        display_earn = earnings_df[earnings_df["days_until"] <= earnings_days_ahead].copy()
+
+        # Color IV/HV ratio column
+        _earn_col_rename = {
+            "ticker": "Ticker",
+            "earnings_date": "Earnings Date",
+            "days_until": "Days Until",
+            "eps_estimate": "EPS Est.",
+            "rev_estimate_b": "Rev Est. ($B)",
+            "iv_median_pct": "IV Median %",
+            "hv_30_pct": "HV 30d %",
+            "iv_hv_ratio": "IV/HV Ratio",
+            "iv_elevated": "IV Elevated?",
+            "price": "Price",
+            "market_cap_b": "Mkt Cap ($B)",
+            "sector": "Sector",
+        }
+        available_earn = {k: v for k, v in _earn_col_rename.items() if k in display_earn.columns}
+        st.subheader(f"Earnings in the Next {earnings_days_ahead} Days")
+
+        def _style_earnings(row):
+            styles = [""] * len(row)
+            cols = list(row.index)
+            if "IV Elevated?" in cols:
+                idx = cols.index("IV Elevated?")
+                if row["IV Elevated?"] is True or str(row["IV Elevated?"]).lower() == "true":
+                    styles[idx] = "background-color: #2d1b1b; color: #ff6b6b"
+            if "Days Until" in cols:
+                idx = cols.index("Days Until")
+                try:
+                    d = int(row["Days Until"])
+                    if d <= 3:
+                        styles[idx] = "background-color: #2d1b00; color: #ffaa00; font-weight: bold"
+                    elif d <= 7:
+                        styles[idx] = "background-color: #1a2d00; color: #88cc44"
+                except Exception:
+                    pass
+            return styles
+
+        display_earn_renamed = display_earn[list(available_earn.keys())].rename(columns=available_earn)
+        st.dataframe(
+            display_earn_renamed.style.apply(_style_earnings, axis=1),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        # IV/HV bar chart for elevated tickers
+        if "iv_hv_ratio" in display_earn.columns and "ticker" in display_earn.columns:
+            iv_chart_df = display_earn[display_earn["iv_hv_ratio"].notna()].copy()
+            if not iv_chart_df.empty:
+                fig_earn = px.bar(
+                    iv_chart_df.head(20),
+                    x="ticker",
+                    y="iv_hv_ratio",
+                    color="iv_elevated",
+                    title="IV/HV Ratio by Ticker (red = elevated premium)",
+                    labels={"ticker": "Ticker", "iv_hv_ratio": "IV / HV Ratio", "iv_elevated": "IV Elevated"},
+                    color_discrete_map={True: "#e05c5c", False: "#4a9eff"},
+                )
+                fig_earn.add_hline(y=1.25, line_dash="dot", line_color="orange",
+                                   annotation_text="1.25× threshold")
+                st.plotly_chart(fig_earn, use_container_width=True)
+
+        st.caption(
+            "IV Median % = median implied volatility across nearest expiry call options. "
+            "HV 30d % = 30-day realised historical volatility (annualised). "
+            "IV/HV ≥ 1.25 (red) means the market is pricing in a larger move than recent history — "
+            "often driven by earnings uncertainty. Data via yfinance, updated hourly."
+        )
+
+    elif earnings_df is not None:
+        st.warning("No upcoming earnings found for the configured ticker universe.")
+    else:
+        st.info("Click **Run Earnings Calendar** to load upcoming events.")
+
+
+# =========================
+# MARKET SCREENER
+# =========================
+
+with tab11:
+
+    st.markdown(
+        "Filter the entire market universe by any combination of **technical factors**. "
+        "Uses pre-computed daily features (RSI, MACD, momentum, volatility, MA alignment, volume ratios). "
+        "Choose a preset or build your own filters."
+    )
+
+    col_preset, col_spacer = st.columns([2, 2])
+    with col_preset:
+        preset_choice = st.selectbox(
+            "Quick Preset",
+            ["Custom"] + list(SCREENER_PRESETS.keys()),
+        )
+
+    if preset_choice != "Custom":
+        preset_info = SCREENER_PRESETS[preset_choice]
+        st.info(f"**{preset_choice}:** {preset_info['description']}")
+        preset_filters = preset_info["filters"]
+    else:
+        preset_filters = {}
+
+    with st.expander("Custom Filters (override preset values)", expanded=(preset_choice == "Custom")):
+        _filter_cols = st.columns(3)
+        custom_filters: dict = {}
+
+        filter_defs = [
+            ("rsi_14",           "RSI (14)",            0.0,  100.0, 0.0,  100.0, 1.0),
+            ("close_ret_5d",     "5D Return %",         -30.0, 50.0, -30.0, 50.0, 0.5),
+            ("volume_ratio_5",   "Vol Ratio 5d",        0.0,   5.0,  0.0,   5.0,  0.1),
+            ("pct_from_52w_high","% from 52W High",     -80.0, 20.0, -80.0, 20.0, 1.0),
+            ("dist_ma_20_pct",   "Dist from 20MA %",    -30.0, 30.0, -30.0, 30.0, 0.5),
+            ("adx_14",           "ADX (14)",             0.0,  80.0,  0.0,  80.0, 1.0),
+        ]
+
+        for i, (col_key, label, abs_min, abs_max, default_min, default_max, step) in enumerate(filter_defs):
+            with _filter_cols[i % 3]:
+                preset_val = preset_filters.get(col_key, {})
+                d_min = preset_val.get("min", default_min)
+                d_max = preset_val.get("max", default_max)
+                low, high = st.slider(
+                    label,
+                    min_value=float(abs_min),
+                    max_value=float(abs_max),
+                    value=(float(d_min), float(d_max)),
+                    step=float(step),
+                )
+                if low > abs_min or high < abs_max:
+                    custom_filters[col_key] = {}
+                    if low > abs_min:
+                        custom_filters[col_key]["min"] = low
+                    if high < abs_max:
+                        custom_filters[col_key]["max"] = high
+
+    active_filters = {**preset_filters, **custom_filters}
+
+    col_run_scr, col_sort, col_info_scr = st.columns([1, 1, 2])
+    with col_run_scr:
+        run_screener_btn = st.button("Run Screener", use_container_width=True)
+    with col_sort:
+        sort_col = st.selectbox("Sort By", list(FILTER_COLUMNS.keys()), index=0)
+    with col_info_scr:
+        if st.session_state["screener_fetched_at"]:
+            st.caption(f"Last run: {st.session_state['screener_fetched_at']}")
+
+    if run_screener_btn:
+        _prog = st.progress(0, text=f"Bulk downloading price data for {len(MARKET_SCAN_TICKERS)} tickers… (~3-5s)")
+        try:
+            import data_fetcher as _df
+            _df.bulk_preload(MARKET_SCAN_TICKERS, period="1y")
+            _prog.progress(40, text="Price data ready — computing technical indicators & applying filters…")
+            screener_result = run_screener(
+                MARKET_SCAN_TICKERS,
+                active_filters,
+                sort_by=sort_col,
+                ascending=(sort_col == "rsi_14"),
+            )
+            _prog.progress(100, text="Done!")
+            _prog.empty()
+            st.session_state["screener_df"] = screener_result
+            st.session_state["screener_fetched_at"] = _now()
+        except Exception as e:
+            _prog.empty()
+            st.error(f"Screener failed: {e}")
+
+    screener_df = st.session_state["screener_df"]
+
+    if screener_df is not None and not screener_df.empty:
+        rename_map = {"ticker": "Ticker", "close": "Price"}
+        rename_map.update({k: v for k, v in FILTER_COLUMNS.items() if k in screener_df.columns})
+        st.subheader(f"{len(screener_df)} tickers matched")
+        st.dataframe(
+            screener_df.rename(columns=rename_map),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        # Scatter: RSI vs 5D Return coloured by MA alignment
+        if "rsi_14" in screener_df.columns and "close_ret_5d" in screener_df.columns:
+            fig_scr = px.scatter(
+                screener_df,
+                x="rsi_14",
+                y="close_ret_5d",
+                color="ma_alignment" if "ma_alignment" in screener_df.columns else None,
+                hover_name="ticker",
+                text="ticker",
+                title="RSI vs 5D Return (by MA alignment)",
+                labels={"rsi_14": "RSI (14)", "close_ret_5d": "5D Return %", "ma_alignment": "MA Align"},
+            )
+            fig_scr.update_traces(textposition="top center")
+            fig_scr.add_vline(x=30, line_dash="dot", line_color="green", annotation_text="Oversold")
+            fig_scr.add_vline(x=70, line_dash="dot", line_color="red", annotation_text="Overbought")
+            fig_scr.add_hline(y=0, line_dash="dot", line_color="gray")
+            st.plotly_chart(fig_scr, use_container_width=True)
+
+        st.caption(
+            "Features are loaded from pre-computed daily snapshots (data/features/). "
+            "Tickers without a snapshot are fetched live from yfinance. "
+            "MA Alignment: +1 = bullish stack (5>10>20), -1 = bearish, 0 = mixed."
+        )
+
+    elif screener_df is not None:
+        st.warning("No tickers matched the current filters. Try widening the ranges.")
+    else:
+        st.info("Select a preset or set custom filters, then click **Run Screener**.")
+
+
+# =========================
+# INSIDER FLOW
+# =========================
+
+with tab12:
+
+    st.markdown(
+        "Recent **insider buy/sell transactions** from Form 4 SEC filings. "
+        "C-suite and director buys — especially large open-market purchases — "
+        "are historically bullish signals. Large insider sells in clusters are bearish."
+    )
+
+    col_run_ins, col_txn_filter, col_rows_ins, col_info_ins = st.columns([1, 1, 1, 2])
+    with col_run_ins:
+        run_insider = st.button("Run Insider Flow", use_container_width=True)
+    with col_txn_filter:
+        insider_txn_filter = st.selectbox("Transaction Type", ["All", "Buy", "Sale"])
+    with col_rows_ins:
+        insider_per_ticker = st.slider("Per Ticker", min_value=1, max_value=10, value=3)
+    with col_info_ins:
+        if st.session_state["insider_fetched_at"]:
+            st.caption(f"Last run: {st.session_state['insider_fetched_at']}")
+
+    insider_ticker_input = st.text_input(
+        "Filter Tickers (comma-separated, or leave blank for full universe)",
+        value="",
+        placeholder="e.g. NVDA, TSLA, AAPL",
+    )
+
+    if run_insider:
+        raw_ins = insider_ticker_input.strip()
+        ins_tickers = (
+            [t.strip().upper() for t in raw_ins.split(",") if t.strip()]
+            if raw_ins else MARKET_SCAN_TICKERS
+        )
+        with st.spinner(f"Fetching insider transactions for {len(ins_tickers)} tickers…"):
+            try:
+                insider_df = get_insider_flow(
+                    ins_tickers,
+                    max_per_ticker=insider_per_ticker,
+                    transaction_filter=insider_txn_filter,
+                )
+                st.session_state["insider_df"] = insider_df
+                st.session_state["insider_fetched_at"] = _now()
+            except Exception as e:
+                st.error(f"Insider flow failed: {e}")
+
+    insider_df = st.session_state["insider_df"]
+
+    if insider_df is not None and not insider_df.empty:
+        display_ins = insider_df.copy()
+        if insider_txn_filter != "All":
+            display_ins = display_ins[display_ins["transaction"] == insider_txn_filter]
+
+        _ins_col_rename = {
+            "ticker": "Ticker",
+            "date": "Date",
+            "insider": "Insider",
+            "position": "Title",
+            "transaction": "Type",
+            "transaction_detail": "Transaction Detail",
+            "shares_fmt": "Shares",
+            "value_fmt": "Value (USD)",
+        }
+        avail_ins = {k: v for k, v in _ins_col_rename.items() if k in display_ins.columns}
+
+        def _style_insider(row):
+            styles = [""] * len(row)
+            cols = list(row.index)
+            if "Type" in cols:
+                idx = cols.index("Type")
+                if str(row["Type"]) == "Buy":
+                    styles[idx] = "background-color: #1a2d00; color: #88cc44; font-weight: bold"
+                elif str(row["Type"]) == "Sale":
+                    styles[idx] = "background-color: #2d1b1b; color: #ff6b6b; font-weight: bold"
+            return styles
+
+        st.subheader(f"{len(display_ins)} insider transactions")
+        st.dataframe(
+            display_ins[list(avail_ins.keys())].rename(columns=avail_ins).style.apply(_style_insider, axis=1),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        # Buy vs Sale count bar chart
+        if "transaction" in insider_df.columns and "ticker" in insider_df.columns:
+            txn_counts = (
+                insider_df[insider_df["transaction"].isin(["Buy", "Sale"])]
+                .groupby(["ticker", "transaction"])
+                .size()
+                .reset_index(name="count")
+            )
+            if not txn_counts.empty:
+                top_tickers = (
+                    txn_counts.groupby("ticker")["count"].sum()
+                    .nlargest(20).index.tolist()
+                )
+                fig_ins = px.bar(
+                    txn_counts[txn_counts["ticker"].isin(top_tickers)],
+                    x="ticker",
+                    y="count",
+                    color="transaction",
+                    barmode="group",
+                    title="Insider Buy vs Sale Count (top tickers)",
+                    color_discrete_map={"Buy": "#88cc44", "Sale": "#e05c5c"},
+                    labels={"ticker": "Ticker", "count": "# Transactions", "transaction": "Type"},
+                )
+                st.plotly_chart(fig_ins, use_container_width=True)
+
+        # EDGAR deep-links
+        if "edgar_link" in display_ins.columns and "ticker" in display_ins.columns:
+            with st.expander("SEC EDGAR Form 4 Filing Links"):
+                seen_links: set = set()
+                for _, row in display_ins.iterrows():
+                    link = row.get("edgar_link", "")
+                    ticker_val = row.get("ticker", "")
+                    if link and ticker_val not in seen_links:
+                        st.markdown(f"- [{ticker_val} — Form 4 filings]({link})")
+                        seen_links.add(ticker_val)
+
+        st.caption(
+            "Data from Yahoo Finance (insider_transactions). "
+            "Form 4 filings are required within 2 business days of the transaction. "
+            "Buy = open-market purchase. Sale = open-market disposal. "
+            "Always cross-reference with SEC EDGAR for full details."
+        )
+
+    elif insider_df is not None:
+        st.warning("No insider transactions found for the selected tickers / filter.")
+    else:
+        st.info("Click **Run Insider Flow** to load recent Form 4 transactions.")
 
