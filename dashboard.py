@@ -319,8 +319,21 @@ with st.sidebar:
             if portfolio_input != st.session_state["chat_portfolio"]:
                 st.session_state["chat_portfolio"] = portfolio_input
 
+        # Chat input — placed after portfolio for natural flow
+        col_msg, col_send = st.columns([4, 1])
+        with col_msg:
+            user_input = st.text_input(
+                "Message",
+                value="",
+                placeholder="Ask about any analysis…",
+                label_visibility="collapsed",
+                key="chat_input_box",
+            )
+        with col_send:
+            send_clicked = st.button("Send", use_container_width=True)
+
         # Chat history display
-        chat_container = st.container(height=420)
+        chat_container = st.container(height=380)
         with chat_container:
             if not st.session_state["chat_history"]:
                 st.markdown(
@@ -337,19 +350,6 @@ with st.sidebar:
             if st.button("Clear chat", use_container_width=True):
                 st.session_state["chat_history"] = []
                 st.rerun()
-
-        # Chat input — text_input + button works reliably in sidebar
-        col_msg, col_send = st.columns([4, 1])
-        with col_msg:
-            user_input = st.text_input(
-                "Message",
-                value="",
-                placeholder="Ask about any analysis…",
-                label_visibility="collapsed",
-                key="chat_input_box",
-            )
-        with col_send:
-            send_clicked = st.button("Send", use_container_width=True)
 
         if send_clicked and user_input.strip():
             msg = user_input.strip()
