@@ -67,6 +67,7 @@ from putcall_scanner import (
 )
 import ai_assistant as ai
 import cache_loader
+import headline_engine as hl
 
 
 ensure_assets_available()
@@ -134,6 +135,36 @@ if _cache_meta.get("status") == "loaded":
 elif _cache_meta.get("status") == "partial":
     _built_at = _cache_meta.get("built_at", "")[:16].replace("T", " ")
     st.sidebar.warning(f"Cache partial — {_built_at} UTC")
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Scrolling market intelligence ticker ──────────────────────────────────────
+# Regenerates every hour during 9 AM–5 PM ET; serves stale outside market hours.
+_hl_needs_refresh = (
+    "headline_stories" not in st.session_state
+    or st.session_state.get("headline_refresh_tick", 0) == 0
+)
+if _hl_needs_refresh:
+    _headlines = hl.get_cached_headlines(session_state=st.session_state)
+    st.session_state["headline_stories"] = _headlines
+    st.session_state["headline_refresh_tick"] = 1
+
+_ticker_html = hl.get_ticker_html(st.session_state["headline_stories"])
+st.markdown(_ticker_html, unsafe_allow_html=True)
+
+# Sidebar: manual refresh button + market-hours indicator
+with st.sidebar:
+    _mh = hl.is_market_hours()
+    st.markdown(
+        f"**Headlines:** {'🟢 Live (refreshes hourly)' if _mh else '⚫ Market closed'}",
+        help="AI-generated summaries from live price data, options flow, sector signals, and macro context.",
+    )
+    if st.button("↺ Refresh Headlines", use_container_width=True):
+        _headlines = hl.get_cached_headlines(
+            session_state=st.session_state,
+            force_refresh=True,
+        )
+        st.session_state["headline_stories"] = _headlines
+        st.rerun()
 # ─────────────────────────────────────────────────────────────────────────────
 
 
