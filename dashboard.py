@@ -57,6 +57,7 @@ from macro_dashboard import (
     classify_market_regime,
     FRED_SERIES,
 )
+from earnings_analyzer import analyse_earnings
 import ai_assistant as ai
 
 
@@ -333,6 +334,9 @@ for state_key, default_value in [
     ("macro_yield_history", None),
     ("macro_yield_curve", None),
     ("macro_fetched_at", None),
+    ("ea_result", None),
+    ("ea_ticker", ""),
+    ("ea_fetched_at", None),
     ("gex_ticker", ""),
     ("gex_data", None),
     ("gex_spot", 0.0),
@@ -1258,7 +1262,7 @@ if st.session_state["trader_mode"] is None:
 
 elif st.session_state["trader_mode"] == "stocks":
 
-    stab1, stab2, stab3, stab4, stab5, stab6, stab7, stab8 = st.tabs([
+    stab1, stab2, stab3, stab4, stab5, stab6, stab7, stab8, stab9 = st.tabs([
         "Ticker\nAnalysis",
         "Earnings\nCalendar",
         "Market\nScreener",
@@ -1267,6 +1271,7 @@ elif st.session_state["trader_mode"] == "stocks":
         "Top\nMovers",
         "Hedge Fund\n13F",
         "Macro\nDashboard",
+        "Earnings\nAnalytics",
     ])
 
     with stab1:
@@ -1580,6 +1585,201 @@ elif st.session_state["trader_mode"] == "stocks":
                         st.plotly_chart(fig_10y, use_container_width=True)
         else:
             st.info("Click **Refresh Macro Data** to load economic indicators.")
+
+
+    # ── EARNINGS ANALYTICS ────────────────────────────────────────────────────
+    with stab9:
+        st.markdown(
+            "**Earnings Surprise Analytics** — pre-earnings intelligence: options-implied move, "
+            "historical beat rate, post-earnings price history, IV rank, and strategy tips. "
+            "Data: yfinance (free, no API key)."
+        )
+
+        col_ea_ticker, col_ea_run = st.columns([3, 1])
+        with col_ea_ticker:
+            ea_input = st.text_input(
+                "Ticker", value="", placeholder="e.g. NVDA, AAPL, TSLA",
+                key="ea_ticker_input",
+            ).upper().strip()
+        with col_ea_run:
+            st.write("")
+            run_ea = st.button("Analyse Earnings", use_container_width=True)
+
+        if run_ea and ea_input:
+            with st.spinner(f"Fetching earnings analytics for {ea_input}…"):
+                ea_result = analyse_earnings(ea_input)
+            st.session_state["ea_result"] = ea_result
+            st.session_state["ea_ticker"] = ea_input
+            st.session_state["ea_fetched_at"] = _now()
+
+        if st.session_state["ea_fetched_at"]:
+            st.caption(f"Last run: {st.session_state['ea_fetched_at']} | Ticker: {st.session_state['ea_ticker']}")
+
+        ea = st.session_state["ea_result"]
+        if ea:
+            if ea.get("error"):
+                st.error(f"Error: {ea['error']}")
+            else:
+                spot = ea.get("spot", 0)
+                next_date = ea.get("next_earnings_date")
+                days_left = ea.get("days_to_earnings")
+                straddle = ea.get("straddle") or {}
+                iv_rank = ea.get("iv_rank")
+                beat_rate = ea.get("beat_rate")
+                beat_count = ea.get("beat_count", 0)
+                total_q = ea.get("total_quarters", 0)
+                avg_move = ea.get("avg_hist_move")
+                median_move = ea.get("median_hist_move")
+                max_move = ea.get("max_hist_move")
+                tips = ea.get("strategy_tips") or []
+
+                # ── Header metrics ────────────────────────────────────────────
+                st.subheader(f"{ea['ticker']} — Earnings Intelligence")
+
+                col1, col2, col3, col4, col5, col6 = st.columns(6)
+                col1.metric("Spot Price", f"${spot:,.2f}")
+                col2.metric(
+                    "Next Earnings",
+                    next_date or "Unknown",
+                    delta=f"{days_left}d away" if days_left is not None else None,
+                )
+                col3.metric(
+                    "Implied Move",
+                    f"±{straddle.get('implied_move_pct', 0):.1f}%",
+                    help="ATM straddle cost ÷ spot price",
+                )
+                col4.metric(
+                    "Avg Historical Move",
+                    f"±{avg_move:.1f}%" if avg_move else "—",
+                    help="Average absolute 1-day post-earnings move",
+                )
+                col5.metric(
+                    "Beat Rate",
+                    f"{beat_rate:.0f}%" if beat_rate is not None else "—",
+                    delta=f"{beat_count}/{total_q} quarters" if total_q else None,
+                )
+                col6.metric(
+                    "IV Rank",
+                    f"{iv_rank:.0f}/100" if iv_rank is not None else "—",
+                    help="Current IV vs 1-year realised vol range (0=cheap, 100=expensive)",
+                )
+
+                st.divider()
+
+                # ── Straddle details ──────────────────────────────────────────
+                if straddle:
+                    st.subheader("Straddle Pricing")
+                    sc1, sc2, sc3, sc4, sc5 = st.columns(5)
+                    sc1.metric("Straddle Cost", f"${straddle.get('straddle_cost', 0):.2f}")
+                    sc2.metric("ATM Strike", f"${straddle.get('atm_strike', 0):.0f}")
+                    sc3.metric("Upside Breakeven", f"${straddle.get('upside_be', 0):.2f}")
+                    sc4.metric("Downside Breakeven", f"${straddle.get('downside_be', 0):.2f}")
+                    sc5.metric("ATM IV", f"{straddle.get('atm_iv', 0):.1f}%",
+                               help=f"Expiration: {straddle.get('expiration', '?')}")
+
+                st.divider()
+
+                # ── Strategy tips ──────────────────────────────────────────────
+                if tips:
+                    st.subheader("Strategy Signals")
+                    for tip in tips:
+                        st.markdown(f"- {tip}")
+
+                st.divider()
+
+                ea_tab1, ea_tab2 = st.tabs(["Post-Earnings Move History", "EPS Beat/Miss History"])
+
+                with ea_tab1:
+                    post_moves = ea.get("post_moves")
+                    if post_moves is not None and not post_moves.empty:
+                        col_stats, col_chart = st.columns([1, 2])
+                        with col_stats:
+                            st.metric("Avg Abs Move", f"±{avg_move:.1f}%" if avg_move else "—")
+                            st.metric("Median Move", f"±{median_move:.1f}%" if median_move else "—")
+                            st.metric("Largest Move", f"±{max_move:.1f}%" if max_move else "—")
+                            implied = straddle.get("implied_move_pct", 0)
+                            if avg_move and implied:
+                                st.metric(
+                                    "Implied vs Historical",
+                                    f"{implied / avg_move:.2f}×",
+                                    delta="overpriced" if implied > avg_move * 1.2 else
+                                          "underpriced" if implied < avg_move * 0.8 else "fair",
+                                    delta_color="inverse" if implied > avg_move * 1.2 else "normal",
+                                )
+                        with col_chart:
+                            colors = post_moves["direction"].map(
+                                {"🟢 Up": "#00cc44", "🔴 Down": "#ff4444"}
+                            )
+                            fig_moves = go.Figure(go.Bar(
+                                x=post_moves["earnings_date"],
+                                y=post_moves["move_pct"],
+                                marker_color=colors,
+                                text=post_moves["move_pct"].apply(lambda v: f"{v:+.1f}%"),
+                                textposition="outside",
+                            ))
+                            fig_moves.add_hline(
+                                y=straddle.get("implied_move_pct", 0), line_dash="dash",
+                                line_color="yellow",
+                                annotation_text=f"Implied +{straddle.get('implied_move_pct', 0):.1f}%",
+                            )
+                            fig_moves.add_hline(
+                                y=-(straddle.get("implied_move_pct", 0)), line_dash="dash",
+                                line_color="yellow",
+                            )
+                            fig_moves.update_layout(
+                                title=f"{ea['ticker']} — Post-Earnings 1-Day Moves",
+                                height=350, margin=dict(t=50, b=40),
+                                yaxis_title="Move %", xaxis_title="",
+                                xaxis_tickangle=-45,
+                                yaxis_zeroline=True,
+                            )
+                            st.plotly_chart(fig_moves, use_container_width=True)
+
+                        st.dataframe(post_moves, use_container_width=True, hide_index=True)
+                    else:
+                        st.info("No historical move data available.")
+
+                with ea_tab2:
+                    earnings_hist = ea.get("earnings_history")
+                    if earnings_hist is not None and not earnings_hist.empty:
+                        disp_hist = earnings_hist.copy()
+                        disp_hist["beat"] = disp_hist["beat"].map(
+                            {True: "✅ Beat", False: "❌ Miss", None: "—"}
+                        )
+                        disp_hist["surprise_pct"] = disp_hist["surprise_pct"].apply(
+                            lambda v: f"{v:+.2f}%" if pd.notna(v) else "—"
+                        )
+                        disp_hist["earnings_date"] = disp_hist["earnings_date"].apply(
+                            lambda d: d.strftime("%Y-%m-%d") if hasattr(d, "strftime") else str(d)
+                        )
+                        disp_hist = disp_hist.rename(columns={
+                            "earnings_date": "Date",
+                            "eps_estimate": "EPS Est.",
+                            "eps_actual": "EPS Actual",
+                            "surprise_pct": "Surprise %",
+                            "beat": "Result",
+                        })
+                        st.dataframe(disp_hist, use_container_width=True, hide_index=True)
+
+                        # Beat/miss bar
+                        if beat_rate is not None:
+                            fig_br = go.Figure(go.Bar(
+                                x=["Beat", "Miss"],
+                                y=[beat_count, total_q - beat_count],
+                                marker_color=["#00cc44", "#ff4444"],
+                                text=[f"{beat_count}", f"{total_q - beat_count}"],
+                                textposition="auto",
+                            ))
+                            fig_br.update_layout(
+                                title=f"EPS Beat vs Miss ({beat_rate:.0f}% beat rate)",
+                                height=280, margin=dict(t=40, b=20),
+                                showlegend=False,
+                            )
+                            st.plotly_chart(fig_br, use_container_width=True)
+                    else:
+                        st.info("No EPS history data available for this ticker.")
+        else:
+            st.info("Enter a ticker and click **Analyse Earnings** to get pre-earnings intelligence.")
 
 
 # =========================
